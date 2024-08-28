@@ -76,6 +76,7 @@ parser.add_argument('--beta', default=0.25, type=float)
 parser.add_argument('--diff_lr', default=True, action='store_true')
 parser.add_argument('--bert_lr', default=3e-5, type=float)
 parser.add_argument('--learning_rate', default=0.002, type=float)
+parser.add_argument('--adj_pad_size', default=100, type=float, help="adj pad size")
 parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
 parser.add_argument("--weight_decay", default=1e-8, type=float, help="Weight deay if we apply some.")
 
@@ -422,7 +423,7 @@ def collate_fn(batch):
     sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, all_syn_adj_1, all_syn_adj_2  = zip(*batch)
 
     # 对 all_syn_adj 进行 padding
-    target_size = 100
+    target_size = args.adj_pad_size
     padded_all_syn_adj_1 = [torch.tensor(pad_to_size(arr, target_size)) for arr in all_syn_adj_1]
     padded_all_syn_adj_2 = [torch.tensor(pad_to_size(arr, target_size)) for arr in all_syn_adj_2]
 

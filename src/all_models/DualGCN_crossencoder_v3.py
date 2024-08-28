@@ -853,7 +853,7 @@ def train_model(df, dev_set):
                             desc="Epoch",
                             leave=True):
         if args.DualGCN:
-            model = model_dual.train()
+            model_dual = model_dual.train()
         else:
             model = model.train()
         tr_loss = 0.0

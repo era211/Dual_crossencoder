@@ -245,7 +245,8 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
                 end_pieces_1,
                 start_pieces_2,
                 end_pieces_2,
-                adj,
+                adj1,
+                adj2,
                 labels=None):
         transformer_output = self.get_sentence_vecs(sentences)  # 得到最后一层表示，（10，512，1024）
         mention_reps_1 = self.get_mention_rep(transformer_output,

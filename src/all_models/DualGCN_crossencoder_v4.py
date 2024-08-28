@@ -484,7 +484,7 @@ def train_model(df, dev_set):
                             desc="Epoch",
                             leave=True):
         if args.DualGCN:
-            model = model_dual.train()
+            model_dual = model_dual.train()
         else:
             model = model.train()
         tr_loss = 0.0
@@ -496,10 +496,10 @@ def train_model(df, dev_set):
         for step, batch in enumerate(batcher):
             batch = tuple(t.to(device) for t in batch)
 
-            sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj= batch
+            sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj1, adj2 = batch
             if args.DualGCN:
                 out_dict = model_dual(sentences, start_pieces_1, end_pieces_1,
-                                             start_pieces_2, end_pieces_2, adj, labels)
+                                             start_pieces_2, end_pieces_2, adj1, adj2, labels)
             else:
                 penal = None
                 out_dict = model(sentences, start_pieces_1, end_pieces_1,
