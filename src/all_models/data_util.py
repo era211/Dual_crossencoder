@@ -268,7 +268,7 @@ def structure_data_for_train(df):  # 构建训练数据对
         ment_sent_2 = get_target_sentence(sentences_text_2, trigger_2_abs_start)
 
         syn_adj_ment1 = syn_sent1(str(ment_sent_1))
-        syn_adj_ment2 = syn_sent1(str(ment_sent_1))
+        syn_adj_ment2 = syn_sent1(str(ment_sent_2))
 
         all_sentences.append(embeddings)  # 两个句子的编码
         all_start_piece_1.append([start_piece_1])

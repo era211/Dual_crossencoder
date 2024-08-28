@@ -250,10 +250,10 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
                 labels=None):
         transformer_output = self.get_sentence_vecs(sentences)  # 得到最后一层表示，（10，512，1024）
         mention_reps_1 = self.get_mention_rep(transformer_output,
-                                              start_pieces_1, end_pieces_1)  # (10,2048)
+                                              start_pieces_1, end_pieces_1)  # (10,2048)  # 得到事件触发词的特征向量
         mention_reps_2 = self.get_mention_rep(transformer_output,
                                               start_pieces_2, end_pieces_2)  # (10,1024*2)
-        outputs1, outputs2, adj_ag, adj_dep, pooled_output = self.gcn_model(transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj)
+        outputs1, outputs2, adj_ag, adj_dep, pooled_output = self.gcn_model(transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj1, adj2)
         # outputs1:(10,512)
         combined_rep = torch.cat(
             [outputs1, outputs2, mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
@@ -348,8 +348,10 @@ class GCNModel(nn.Module):
         self.device = device
         self.gcn = GCNBert(device, bert, opt, opt.num_layers).to(device)
 
-    def forward(self, transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj):
-        h1, h2, adj_ag, pooled_output = self.gcn(transformer_output, adj, sentences)
+    def forward(self, transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj1, adj2):
+        h1, h2, adj_ag, pooled_output = self.gcn(transformer_output, adj1, sentences)
+        h1, h2, adj_ag, pooled_output = self.gcn(transformer_output, adj2, sentences)
+
 
         # avg pooling asp feature
         mask = sentences != 1  # (10, 512)句子部分为1，padding部分为0
@@ -358,7 +360,7 @@ class GCNModel(nn.Module):
         aspect_mask = mask.unsqueeze(-1).repeat(1, 1, self.opt.bert_dim // 2)  # (10, 512, 512)
         outputs1 = (h1 * aspect_mask).sum(dim=1) / asp_wn  # (10, 512)
         outputs2 = (h2 * aspect_mask).sum(dim=1) / asp_wn
-        return outputs1, outputs2, adj_ag, adj, pooled_output
+        return outputs1, outputs2, adj_ag, adj1, pooled_output
 
 
 class GCNBert(nn.Module):
