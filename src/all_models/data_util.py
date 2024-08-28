@@ -1,12 +1,129 @@
-import torch
-import numpy as np
+import json
+import argparse
+import traceback
+import pandas as pd
 from tqdm import tqdm, trange
 from absa_parser import headparser
 from transformers import RobertaTokenizer, AdamW
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 tokenizer = RobertaTokenizer.from_pretrained("/home/yaolong/PT_MODELS/PT_MODELS/roberta-base")  # tokenizer
-
+from fine_v4 import *
 from torch.utils.data import Dataset, DataLoader
+
+'''添加参数'''
+parser = argparse.ArgumentParser(description='Training a cross-encoder')
+parser.add_argument('--config_path',
+                    type=str,
+                    default='/home/yaolong/Rationale4CDECR-main/configs/main/ecb/baseline.json',
+                    help=' The path configuration json file')
+
+parser.add_argument('--out_dir',
+                    type=str,
+                    default='/home/yaolong/Rationale4CDECR-main/outputs/main/ecb/baseline/best_model',
+                    help=' The directory to the output folder')
+
+parser.add_argument('--mode',
+                    type=str,
+                    default='train',
+                    help='train or eval')
+
+# parser.add_argument('--eval',
+#                     dest='evaluate_dev',
+#                     action='store_true',
+#                     help='evaluate_dev')
+
+parser.add_argument('--random_seed',
+                    type=int,
+                    default=5,
+                    help=' Random Seed')
+# GPU index
+parser.add_argument('--gpu_num',
+                    type=int,
+                    default=0,
+                    help=' A single GPU number')
+
+# DualGCN
+parser.add_argument('--DualGCN',
+                    type=bool,
+                    default=True,
+                    help=' use DualGCN')
+parser.add_argument('--num_layers',
+                    type=int,
+                    default=2,
+                    help='Num of GCN layers.')
+parser.add_argument('--bert_dropout',
+                    type=float,
+                    default=0.3,
+                    help='BERT dropout rate.')
+parser.add_argument('--gcn_dropout',
+                    type=float,
+                    default=0.1,
+                    help='GCN layer dropout rate.')
+parser.add_argument('--bert_dim',
+                    type=int,
+                    default=1024,
+                    help='RoBERTa-large embedding size.')
+parser.add_argument('--attention_heads',
+                    type=int,
+                    default=1,
+                    help='number of multi-attention heads')
+parser.add_argument('--losstype',
+                    type=str,
+                    default='doubleloss',
+                    help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
+parser.add_argument('--alpha', default=0.25, type=float)
+parser.add_argument('--beta', default=0.25, type=float)
+parser.add_argument('--diff_lr', default=True, action='store_true')
+parser.add_argument('--bert_lr', default=3e-5, type=float)
+parser.add_argument('--learning_rate', default=0.002, type=float)
+parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+parser.add_argument("--weight_decay", default=1e-8, type=float, help="Weight deay if we apply some.")
+
+# load all config parameters for training
+args = parser.parse_args()
+# use train/dev data in 'train' mode, and use test data in 'eval' mode
+assert args.mode in ['train', 'eval'], "mode must be train or eval!"
+# In the `train' mode, the best model and the evaluation results of the dev corpus are saved.
+# In the `eval' mode, evaluation results of the test corpus are saved.
+
+# 读取配置文件
+with open(args.config_path, 'r') as js_file:
+    config_dict = json.load(js_file)
+
+'''读取数据'''
+print('Loading fixed dev set')
+# 这些数据对的产生过程
+ecb_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/dev/dev_pairs')
+fcc_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/dev/dev_pairs')
+gvc_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/dev/dev_pairs')
+
+print('Loading fixed test set')
+ecb_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/test/test_pairs')
+fcc_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/test/test_pairs')
+gvc_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/test/test_pairs')
+print('successful loading fixed dev & test sets')
+
+
+nn_generated_fixed_eval_pairs = {
+    'ecb':
+        {
+            'dev': ecb_dev_set,
+            'test': ecb_test_set
+        },
+    'fcc':
+        {
+            'dev': fcc_dev_set,
+            'test': fcc_test_set
+        },
+    'gvc':
+        {
+            'dev': gvc_dev_set,
+            'test': gvc_test_set
+        }
+}
+
+
+'''自定义数据类'''
 class PairedDataset(Dataset):
     def __init__(self, data_set_in_tensor, all_syn_adj_1, all_syn_adj_2):
         self.data_set_in_tensor = data_set_in_tensor
@@ -43,6 +160,7 @@ def softmax1(x):
     return x
 
 
+'''构造train数据'''
 def get_target_sentence(sentence, trigger_id):
     import nltk
     # nltk.download('punkt')
@@ -162,8 +280,8 @@ def structure_data_for_train(df):  # 构建训练数据对
         ment_sentences.append([str(ment_sent_1) + '<SEP> ' + str(ment_sent_2)])
 
 
-    data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1), \
-                                       torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2), \
+    data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1),
+                                       torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2),
                                        torch.tensor(all_end_piece_2), torch.tensor(all_labels))
 
     # 创建 PairedDataset 实例
@@ -171,6 +289,130 @@ def structure_data_for_train(df):  # 构建训练数据对
     print("训练数据读取完成")
     return paired_dataset
 
+
+'''构造dev数据'''
+def get_sents(sentences, sentence_id, window=config_dict["window_size"]):
+    ''' Get sentence instances S_{i-w},..., S_{i},..., S_{i+w}
+        params:
+            sentences: a list of `sentence' instances in a document
+            sentence_id: the id of the `sentence' instance where the event mention occurs in the document
+            window: the window size, it determines how many sentences around the event mention are included in the discourse
+        return:
+            (a list of `sentence' instances in the window,
+                the offset of the mention sentence in the window) 返回当前mention对应句子前后各Windows个范围之内的句子（相当于包含了上下文），当前句子在窗口范围中对应位置
+    '''
+    lookback = max(0, sentence_id - window)  # 当前mention所在的句子的前窗口范围个句子
+    lookforward = min(sentence_id + window, max(sentences.keys())) + 1  # 当前mention所在句子的后窗口范围个句子
+    return ([sentences[_id]
+             for _id in range(lookback, lookforward)], sentence_id - lookback)
+
+
+def structure_pair_dual(mention_1, mention_2, doc_dict, window=config_dict["window_size"]):
+    ''' Curate the necessary information for model input
+        params:
+            mention_1: the first mention instance
+            mention_2: the second mention instance
+            doc_dict: a dictionary of documents,
+                where the key is the document id and the value is the document instance
+            window: the window size, it determines how many sentences around
+                the event mention are included in the discourse
+        return:
+            record: it the necessary information for model input
+    '''
+    try:
+        sents_1, sent_id_1 = get_sents(doc_dict[mention_1.doc_id].sentences,  # 得到当前mention所在句子窗口范围的上下文句子以及在+-窗口范围中的相对位置
+                                       mention_1.sent_id,
+                                       window)  # doc_dict[mention_1.doc_id].sentences得到当前mention对应的doc_id文档中的所有句子，mention_1.sent_id得到当前mention对应句子的索引
+        sents_2, sent_id_2 = get_sents(doc_dict[mention_2.doc_id].sentences,
+                                       mention_2.sent_id, window)
+
+        tokens, token_map, offset_1, offset_2, mention_sent_1, mention_sent_2 = tokenize_and_map_pair(
+            # tokens是mention上下文窗口中所有原始句子编码后的token数字序列，token_map是原始句子中每个单词索引和编码的各个token索引之间的映射，其他两个是mention所在句子在token序列中的对应位置
+            sents_1, sents_2, sent_id_1, sent_id_2, tokenizer)
+
+        syn_adj_1 = syn_sent1(mention_sent_1)
+        syn_adj_2 = syn_sent1(mention_sent_2)
+
+        start_piece_1 = token_map[offset_1 + mention_1.start_offset][0]  # 得到mention在token序列中的起始位置
+        if offset_1 + mention_1.end_offset in token_map:
+            end_piece_1 = token_map[offset_1 + mention_1.end_offset][-1]  # 得到mention的token表示的起始和结束索引
+        else:
+            end_piece_1 = token_map[offset_1 + mention_1.start_offset][-1]
+        start_piece_2 = token_map[offset_2 + mention_2.start_offset][0]
+        if offset_2 + mention_2.end_offset in token_map:
+            end_piece_2 = token_map[offset_2 + mention_2.end_offset][-1]
+        else:
+            end_piece_2 = token_map[offset_2 + mention_2.start_offset][-1]
+        label = [1.0] if mention_1.gold_tag == mention_2.gold_tag else [0.0]  # 通过gold_tag来判断两个mention是否共指
+        record = {
+            "id": [id],
+            "sentence": tokens,
+            # the embedding of pairwise mention data, i.e., tokenizer(sent1_with_discourse, sent2_with_discourse)
+            "label": label,  # coref (1.0) or non-coref (0.0)
+            "start_piece_1": [start_piece_1],  # the start and end offset of trigger_1 pieces in "sentence"
+            "end_piece_1": [end_piece_1],
+            "start_piece_2": [start_piece_2],  # # the start and end offset of trigger_2 pieces in "sentence"
+            "end_piece_2": [end_piece_2],
+            "syn_adj_1": syn_adj_1,
+            "syn_adj_2": syn_adj_2,
+            "ment_sentences": mention_sent_1 + '<SEP>' + mention_sent_2
+        }
+    except:
+        if window > 0:
+            return structure_pair_dual(mention_1, mention_2, doc_dict, window - 1)
+        else:
+            traceback.print_exc()
+            sys.exit()
+    return record
+
+
+def structure_dataset_for_eval(data_set, eval_set='dev'):
+    assert eval_set in ['dev', 'test'], "please check the eval_set!"
+    processed_dataset = []
+    doc_dict = {
+        key: document
+        for topic in data_set.topics.values()
+        for key, document in topic.docs.items()
+    }  # dataset用来构建原始数据集中所有主题的文档字典
+    train_set_name = config_dict["training_dataset"]
+    test_set_name = config_dict["test_dataset"]
+    if eval_set == 'dev':
+        # even in ood test, dev and train set are from the same corpus.
+        pairs = nn_generated_fixed_eval_pairs[train_set_name][eval_set]
+    elif eval_set == 'test':
+        pairs = nn_generated_fixed_eval_pairs[test_set_name][
+            eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
+    pairs = list(pairs)  # 将字典类型转换为列表类型
+    id = 0
+    for mention_1, mention_2 in tqdm(pairs[:50]):  # 从提及对数据列表中分别读取每一对mention
+        record = structure_pair_dual(mention_1, mention_2,
+                                     doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
+        processed_dataset.append(record)
+        id = id + 1
+    sentences = torch.tensor(
+        [record["sentence"] for record in processed_dataset])
+    labels = torch.tensor([record["label"] for record in processed_dataset])
+    start_pieces_1 = torch.tensor(
+        [record["start_piece_1"] for record in processed_dataset])
+    end_pieces_1 = torch.tensor(
+        [record["end_piece_1"] for record in processed_dataset])
+    start_pieces_2 = torch.tensor(
+        [record["start_piece_2"] for record in processed_dataset])
+    end_pieces_2 = torch.tensor(
+        [record["end_piece_2"] for record in processed_dataset])
+    # id = torch.tensor(
+    #     [record["id"] for record in processed_dataset])
+    all_syn_adj_1 = [record["syn_adj_1"] for record in processed_dataset]
+    all_syn_adj_2 = [record["syn_adj_2"] for record in processed_dataset]
+    # ment_sentences = [record["ment_sentences"] for record in processed_dataset]
+    print(labels.sum() / float(labels.shape[0]))
+    tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
+                                   start_pieces_2, end_pieces_2, labels)
+
+    # 创建 PairedDataset 实例
+    paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
+    print('验证集数据构造完成...')
+    return paired_dataset, pairs, doc_dict
 
 def pad_to_size(array, target_size):
     padded_array = np.pad(array, (0, target_size - array.shape[0]), 'constant')

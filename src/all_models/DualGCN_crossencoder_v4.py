@@ -7,16 +7,11 @@ import sys
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import random
 import logging
-import argparse
-import traceback
 import itertools
 from tqdm import tqdm, trange
 # --- data process
-import numpy as np
-import pandas as pd
 import pickle
 import pickle as cPickle
-import json
 # ---
 from scorer import *  # calculate coref metrics
 # For clustering
@@ -42,85 +37,8 @@ from data_util import *
 from classes import *  # make sure classes in "/src/shared/" can be imported.
 from bcubed_scorer import *
 from coarse import *
-from fine import *
+from fine_v4 import *
 
-parser = argparse.ArgumentParser(description='Training a cross-encoder')
-parser.add_argument('--config_path',
-                    type=str,
-                    default='/home/yaolong/Rationale4CDECR-main/configs/main/ecb/baseline.json',
-                    help=' The path configuration json file')
-
-parser.add_argument('--out_dir',
-                    type=str,
-                    default='/home/yaolong/Rationale4CDECR-main/outputs/main/ecb/baseline/best_model',
-                    help=' The directory to the output folder')
-
-parser.add_argument('--mode',
-                    type=str,
-                    default='train',
-                    help='train or eval')
-
-# parser.add_argument('--eval',
-#                     dest='evaluate_dev',
-#                     action='store_true',
-#                     help='evaluate_dev')
-
-parser.add_argument('--random_seed',
-                    type=int,
-                    default=5,
-                    help=' Random Seed')
-# GPU index
-parser.add_argument('--gpu_num',
-                    type=int,
-                    default=0,
-                    help=' A single GPU number')
-
-# DualGCN
-parser.add_argument('--DualGCN',
-                    type=bool,
-                    default=True,
-                    help=' use DualGCN')
-parser.add_argument('--num_layers',
-                    type=int,
-                    default=2,
-                    help='Num of GCN layers.')
-parser.add_argument('--bert_dropout',
-                    type=float,
-                    default=0.3,
-                    help='BERT dropout rate.')
-parser.add_argument('--gcn_dropout',
-                    type=float,
-                    default=0.1,
-                    help='GCN layer dropout rate.')
-parser.add_argument('--bert_dim',
-                    type=int,
-                    default=1024,
-                    help='RoBERTa-large embedding size.')
-parser.add_argument('--attention_heads',
-                    type=int,
-                    default=1,
-                    help='number of multi-attention heads')
-parser.add_argument('--losstype',
-                    type=str,
-                    default='doubleloss',
-                    help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
-parser.add_argument('--alpha', default=0.25, type=float)
-parser.add_argument('--beta', default=0.25, type=float)
-parser.add_argument('--diff_lr', default=True, action='store_true')
-parser.add_argument('--bert_lr', default=3e-5, type=float)
-parser.add_argument('--learning_rate', default=0.002, type=float)
-parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-parser.add_argument("--weight_decay", default=1e-8, type=float, help="Weight deay if we apply some.")
-
-# load all config parameters for training
-args = parser.parse_args()
-assert args.mode in ['train', 'eval'], "mode must be train or eval!"
-# In the `train' mode, the best model and the evaluation results of the dev corpus are saved.
-# In the `eval' mode, evaluation results of the test corpus are saved.
-
-# 读取配置文件
-with open(args.config_path, 'r') as js_file:
-    config_dict = json.load(js_file)
 
 # out_dir
 out_dir = args.out_dir
@@ -166,188 +84,6 @@ patience = 0  # for early stopping
 comparison_set = set()
 tokenizer = RobertaTokenizer.from_pretrained("/home/yaolong/PT_MODELS/PT_MODELS/roberta-base")  # tokenizer
 # 这个tokenizer在哪里使用了：构建训练句子对的时候，对句子对进行token化
-# use train/dev data in 'train' mode, and use test data in 'eval' mode
-print('Loading fixed dev set')
-# 这些数据对的产生过程
-ecb_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/dev/dev_pairs')
-fcc_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/dev/dev_pairs')
-gvc_dev_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/dev/dev_pairs')
-
-print('Loading fixed test set')
-ecb_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/test/test_pairs')
-fcc_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/test/test_pairs')
-gvc_test_set = pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/test/test_pairs')
-print('successful loading fixed dev & test sets')
-
-nn_generated_fixed_eval_pairs = {
-    'ecb':
-        {
-            'dev': ecb_dev_set,
-            'test': ecb_test_set
-        },
-    'fcc':
-        {
-            'dev': fcc_dev_set,
-            'test': fcc_test_set
-        },
-    'gvc':
-        {
-            'dev': gvc_dev_set,
-            'test': gvc_test_set
-        }
-}
-
-
-
-
-
-def get_sents(sentences, sentence_id, window=config_dict["window_size"]):
-    ''' Get sentence instances S_{i-w},..., S_{i},..., S_{i+w}
-        params:
-            sentences: a list of `sentence' instances in a document
-            sentence_id: the id of the `sentence' instance where the event mention occurs in the document
-            window: the window size, it determines how many sentences around the event mention are included in the discourse
-        return:
-            (a list of `sentence' instances in the window,
-                the offset of the mention sentence in the window) 返回当前mention对应句子前后各Windows个范围之内的句子（相当于包含了上下文），当前句子在窗口范围中对应位置
-    '''
-    lookback = max(0, sentence_id - window)  # 当前mention所在的句子的前窗口范围个句子
-    lookforward = min(sentence_id + window, max(sentences.keys())) + 1  # 当前mention所在句子的后窗口范围个句子
-    return ([sentences[_id]
-             for _id in range(lookback, lookforward)], sentence_id - lookback)
-
-
-def structure_pair_dual(id,
-                        mention_1,
-                        mention_2,
-                        doc_dict,
-                        window=config_dict["window_size"]):
-    ''' Curate the necessary information for model input
-        params:
-            mention_1: the first mention instance
-            mention_2: the second mention instance
-            doc_dict: a dictionary of documents,
-                where the key is the document id and the value is the document instance
-            window: the window size, it determines how many sentences around
-                the event mention are included in the discourse
-        return:
-            record: it the necessary information for model input
-    '''
-    try:
-        sents_1, sent_id_1 = get_sents(doc_dict[mention_1.doc_id].sentences,  # 得到当前mention所在句子窗口范围的上下文句子以及在+-窗口范围中的相对位置
-                                       mention_1.sent_id,
-                                       window)  # doc_dict[mention_1.doc_id].sentences得到当前mention对应的doc_id文档中的所有句子，mention_1.sent_id得到当前mention对应句子的索引
-        sents_2, sent_id_2 = get_sents(doc_dict[mention_2.doc_id].sentences,
-                                       mention_2.sent_id, window)
-
-        tokens, token_map, offset_1, offset_2, mention_sent_1, mention_sent_2 = tokenize_and_map_pair(
-            # tokens是mention上下文窗口中所有原始句子编码后的token数字序列，token_map是原始句子中每个单词索引和编码的各个token索引之间的映射，其他两个是mention所在句子在token序列中的对应位置
-            sents_1, sents_2, sent_id_1, sent_id_2, tokenizer)
-
-        # syn_adj = syn_sent1(mention_sent_1 + '' + mention_sent_2)
-        start_piece_1 = token_map[offset_1 + mention_1.start_offset][0]  # 得到mention在token序列中的起始位置
-        if offset_1 + mention_1.end_offset in token_map:
-            end_piece_1 = token_map[offset_1 + mention_1.end_offset][-1]  # 得到mention的token表示的起始和结束索引
-        else:
-            end_piece_1 = token_map[offset_1 + mention_1.start_offset][-1]
-        start_piece_2 = token_map[offset_2 + mention_2.start_offset][0]
-        if offset_2 + mention_2.end_offset in token_map:
-            end_piece_2 = token_map[offset_2 + mention_2.end_offset][-1]
-        else:
-            end_piece_2 = token_map[offset_2 + mention_2.start_offset][-1]
-        label = [1.0] if mention_1.gold_tag == mention_2.gold_tag else [0.0]  # 通过gold_tag来判断两个mention是否共指
-        record = {
-            "id": [id],
-            "sentence": tokens,
-            # the embedding of pairwise mention data, i.e., tokenizer(sent1_with_discourse, sent2_with_discourse)
-            "label": label,  # coref (1.0) or non-coref (0.0)
-            "start_piece_1": [start_piece_1],  # the start and end offset of trigger_1 pieces in "sentence"
-            "end_piece_1": [end_piece_1],
-            "start_piece_2": [start_piece_2],  # # the start and end offset of trigger_2 pieces in "sentence"
-            "end_piece_2": [end_piece_2],
-            # "syn_adj": syn_adj,
-            "ment_sentences": mention_sent_1 + '' + mention_sent_2
-        }
-    except:
-        if window > 0:
-            return structure_pair_dual(id, mention_1, mention_2, doc_dict, window - 1)
-        else:
-            traceback.print_exc()
-            sys.exit()
-    return record
-
-def structure_pair_dual1(mention_1,
-                   mention_2,
-                   doc_dict,
-                   window=config_dict["window_size"]):
-    ''' Curate the necessary information for model input
-        params:
-            mention_1: the first mention instance
-            mention_2: the second mention instance
-            doc_dict: a dictionary of documents,
-                where the key is the document id and the value is the document instance
-            window: the window size, it determines how many sentences around
-                the event mention are included in the discourse
-        return:
-            record: it the necessary information for model input
-    '''
-    try:
-        sents_1, sent_id_1 = get_sents(doc_dict[mention_1.doc_id].sentences,  # 得到当前mention所在句子窗口范围的上下文句子以及在+-窗口范围中的相对位置
-                                       mention_1.sent_id,
-                                       window)  # doc_dict[mention_1.doc_id].sentences得到当前mention对应的doc_id文档中的所有句子，mention_1.sent_id得到当前mention对应句子的索引
-        sents_2, sent_id_2 = get_sents(doc_dict[mention_2.doc_id].sentences,
-                                       mention_2.sent_id, window)
-
-        tokens, token_map, offset_1, offset_2,  mention_sent_1, mention_sent_2 = tokenize_and_map_pair(
-            # tokens是mention上下文窗口中所有原始句子编码后的token数字序列，token_map是原始句子中每个单词索引和编码的各个token索引之间的映射，其他两个是mention所在句子在token序列中的对应位置
-            sents_1, sents_2, sent_id_1, sent_id_2, tokenizer)
-
-        syn_adj = syn_sent1(mention_sent_1+ ''+ mention_sent_2)
-        start_piece_1 = token_map[offset_1 + mention_1.start_offset][0]  # 得到mention在token序列中的起始位置
-        if offset_1 + mention_1.end_offset in token_map:
-            end_piece_1 = token_map[offset_1 + mention_1.end_offset][-1]  # 得到mention的token表示的起始和结束索引
-        else:
-            end_piece_1 = token_map[offset_1 + mention_1.start_offset][-1]
-        start_piece_2 = token_map[offset_2 + mention_2.start_offset][0]
-        if offset_2 + mention_2.end_offset in token_map:
-            end_piece_2 = token_map[offset_2 + mention_2.end_offset][-1]
-        else:
-            end_piece_2 = token_map[offset_2 + mention_2.start_offset][-1]
-        label = [1.0] if mention_1.gold_tag == mention_2.gold_tag else [0.0]  # 通过gold_tag来判断两个mention是否共指
-        record = {
-            "sentence": tokens,
-            # the embedding of pairwise mention data, i.e., tokenizer(sent1_with_discourse, sent2_with_discourse)
-            "label": label,  # coref (1.0) or non-coref (0.0)
-            "start_piece_1": [start_piece_1],  # the start and end offset of trigger_1 pieces in "sentence"
-            "end_piece_1": [end_piece_1],
-            "start_piece_2": [start_piece_2],  # # the start and end offset of trigger_2 pieces in "sentence"
-            "end_piece_2": [end_piece_2],
-            "syn_adj": syn_adj
-        }
-    except:
-        if window > 0:
-            return structure_pair_dual(mention_1, mention_2, doc_dict, window - 1)
-        else:
-            traceback.print_exc()
-            sys.exit()
-    return record
-
-def structure_dataset_for_eval(data_set,
-                               eval_set='dev'):
-    assert eval_set in ['dev', 'test'], "please check the eval_set!"
-    with open('/home/yaolong/Rationale4CDECR-main/data_preparation/dev_data_output.pkl', 'rb') as file:
-        # 使用 pickle.load() 加载文件中的对象
-        loaded_data = pickle.load(file)
-    tensor_dataset = loaded_data['dev_event_pairs']
-    pairs = loaded_data['dev_pairs']
-    doc_dict = loaded_data['dev_docs']
-    # print(labels.sum() / float(labels.shape[0]))
-    print('验证集数据构造完成...')
-    return tensor_dataset, pairs, doc_dict
-
-
-
-
 
 def structer_adj_dep(sentences, batch):
     print('构造adj...')
@@ -468,9 +204,7 @@ def find_cluster_key(node, clusters):
 
 def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
     if config_dict["oracle"]:
-        print("oracle=True")
         return True
-    print("oracle=False")
     score = 0.0
     sample_size = 100
     global comparison_set
@@ -489,27 +223,37 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
             comparison_set = comparison_set | set(
                 [frozenset([mention_id_1, mention_id_2])])
             mention_2 = mentions[mention_id_2]
-            record = structure_pair_dual1(mention_1, mention_2, doc_dict)
+            record = structure_pair_dual(mention_1, mention_2, doc_dict)
             records.append(record)
         sentences = torch.tensor([record["sentence"]
-                                  for record in records]).to(model.device)
+                                  for record in records])
         labels = torch.tensor([record["label"]
-                               for record in records]).to(model.device)
+                               for record in records])
         start_pieces_1 = torch.tensor(
-            [record["start_piece_1"] for record in records]).to(model.device)
+            [record["start_piece_1"] for record in records])
         end_pieces_1 = torch.tensor(
-            [record["end_piece_1"] for record in records]).to(model.device)
+            [record["end_piece_1"] for record in records])
         start_pieces_2 = torch.tensor(
-            [record["start_piece_2"] for record in records]).to(model.device)
+            [record["start_piece_2"] for record in records])
         end_pieces_2 = torch.tensor(
-            [record["end_piece_2"] for record in records]).to(model.device)
-        adj = torch.tensor(
-            [record["syn_adj"] for record in records]).to(model.device)
+            [record["end_piece_2"] for record in records])
+        all_syn_adj_1 = [record["syn_adj_1"] for record in records]
+        all_syn_adj_2 = [record["syn_adj_2"] for record in records]
+        tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
+                                           start_pieces_2, end_pieces_2, labels)
+
+        # 创建 PairedDataset 实例
+        paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
+        dev_dataloader = DataLoader(paired_dataset,
+                                    sampler=SequentialSampler(paired_dataset),
+                                    batch_size=len(all_syn_adj_1))
+        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj = dev_dataloader
         with torch.no_grad():
             out_dict = model(sentences, start_pieces_1, end_pieces_1,
                                 start_pieces_2, end_pieces_2, adj, labels)
             mean_prob = torch.mean(out_dict["probabilities"]).item()
             score += mean_prob
+    print('判断是否将聚类合并完成：', (score / len(cluster_1)) >= 0.5)
     return (score / len(cluster_1)) >= 0.5
 
 
@@ -709,13 +453,13 @@ def train_model(df, dev_set):
     logging.info("device: {} n_gpu: {}".format(device, n_gpu))
     print(f"Using device: {device}")
     # load bi-encoder model
-    event_encoder_path = config_dict['event_encoder_model']
-    with open(event_encoder_path, 'rb') as f:
-        params = torch.load(f, map_location=device)  # 将读取到的数据加载到指定的设备上，默认为0卡
-        event_encoder = EncoderCosineRanker(device)
-        event_encoder.load_state_dict(params)
-        event_encoder = event_encoder.to(device).eval()
-        event_encoder.requires_grad = False
+    # event_encoder_path = config_dict['event_encoder_model']
+    # with open(event_encoder_path, 'rb') as f:
+    #     params = torch.load(f, map_location=device)  # 将读取到的数据加载到指定的设备上，默认为0卡
+    #     event_encoder = EncoderCosineRanker(device)
+    #     event_encoder.load_state_dict(params)
+    #     event_encoder = event_encoder.to(device).eval()
+    #     event_encoder.requires_grad = False
     model = CoreferenceCrossEncoder(device).to(device)
     model_dual = CoreferenceCrossEncoder_DualGCN(device, args=args).to(device)
     train_data_num = len(df)  # baseline: 49864
@@ -787,7 +531,7 @@ def train_model(df, dev_set):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-        evaluate(model_dual, event_encoder, dev_dataloader, dev_pairs, dev_docs,
+        evaluate(model_dual, dev_dataloader, dev_pairs, dev_docs,
                  epoch_idx)
 
 
