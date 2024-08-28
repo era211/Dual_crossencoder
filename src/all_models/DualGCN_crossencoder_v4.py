@@ -27,7 +27,6 @@ import torch
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 # from torch.utils.tensorboard import SummaryWriter
 import torch.optim as optim
-from transformers import RobertaTokenizer, AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 
 #  Dynamically adding module search paths
@@ -39,7 +38,7 @@ for pack in os.listdir(src_dir):
         sys.path.append(full_path)
 sys.path.append("/home/yaolong/Rationale4CDECR-main/src/shared/")
 sys.path.append("/home/yaolong/Rationale4CDECR-main/src/LAL_Parser/src_joint/")
-from absa_parser import headparser
+from data_util import *
 from classes import *  # make sure classes in "/src/shared/" can be imported.
 from bcubed_scorer import *
 from coarse import *
@@ -198,77 +197,8 @@ nn_generated_fixed_eval_pairs = {
         }
 }
 
-from torch.utils.data import Dataset, DataLoader
-class PairedDataset(Dataset):
-    def __init__(self, data_set_in_tensor, all_syn_adj):
-        self.data_set_in_tensor = data_set_in_tensor
-        self.all_syn_adj = all_syn_adj
-
-    def __len__(self):
-        # 假设两个张量的长度相同
-        return len(self.all_syn_adj)
-
-    def __getitem__(self, idx):
-        # 返回两个张量中对应的数据对
-        data = self.data_set_in_tensor[idx]
-        syn_adj = self.all_syn_adj[idx]
-        return (*data, syn_adj)
 
 
-def pad_to_size(array, target_size):
-    padded_array = np.pad(array, (0, target_size - array.shape[0]), 'constant')
-    return padded_array
-
-def collate_fn(batch):
-    sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, all_syn_adj = zip(*batch)
-
-    # 对 all_syn_adj 进行 padding
-    target_size = 512
-    padded_all_syn_adj = [torch.tensor(pad_to_size(arr, target_size)) for arr in all_syn_adj]
-
-    # 将每个部分堆叠为张量
-    return (
-        torch.stack(sentences),
-        torch.stack(start_pieces_1),
-        torch.stack(end_pieces_1),
-        torch.stack(start_pieces_2),
-        torch.stack(end_pieces_2),
-        torch.stack(labels),
-        torch.stack(padded_all_syn_adj)
-    )
-
-
-def softmax1(x):
-    if len(x.shape) > 1:
-        # matrix
-        tmp = np.max(x, axis=1)
-        x -= tmp.reshape((x.shape[0], 1))
-        x = np.exp(x)
-        tmp = np.sum(x, axis=1)
-        x /= tmp.reshape((x.shape[0], 1))
-    else:
-        # vector
-        tmp = np.max(x)
-        x -= tmp
-        x = np.exp(x)
-        tmp = np.sum(x)
-        x /= tmp
-    return x
-
-
-def syn_sent1(sentence):
-    headp, syntree = headparser.parse_heads(sentence)  # 返回句法树和依赖关系弧矩阵
-    ori_adj = softmax1(headp[0])
-    ori_adj = np.delete(ori_adj, 0, axis=0)
-    ori_adj = np.delete(ori_adj, 0, axis=1)  # 删除了矩阵 ori_adj 的第一行和第一列，依存关系弧矩阵的第一个元素代表根节点或特定的虚拟节点，而这些节点在计算中可能是不必要的
-    ori_adj -= np.diag(
-        np.diag(ori_adj))  # 从 ori_adj 矩阵中减去其对角线上的元素。这样做的目的是将对角线上的值（通常表示一个词与自身的依赖关系）归零，确保在接下来的操作中仅考虑词与其他词的依赖关系。
-    # if not opt.direct:  # 检查是否使用有向图或者无向图
-    ori_adj = ori_adj + ori_adj.T  # 如果 opt.direct 为 False，表示使用无向图。在这种情况下，这行代码将矩阵 ori_adj 与它的转置矩阵 ori_adj.T 相加，从而将其转换为对称矩阵。这意味着如果 ori_adj[i][j] 有值，那么 ori_adj[j][i] 也会有相同的值，表示无向的依赖关系
-    ori_adj = ori_adj + np.eye(ori_adj.shape[0])  # 向矩阵 ori_adj 的对角线位置添加 1，可以视为在图结构中，每个节点自身都有一个环
-    # assert len(text_list) == ori_adj.shape[0] == ori_adj.shape[1], '{}-{}-{}'.format(len(text_list), text_list, ori_adj.shape)
-    dj = np.pad(ori_adj, (0, 512 - ori_adj.shape[0]), 'constant')
-    return dj
 
 
 def get_sents(sentences, sentence_id, window=config_dict["window_size"]):
@@ -285,38 +215,6 @@ def get_sents(sentences, sentence_id, window=config_dict["window_size"]):
     lookforward = min(sentence_id + window, max(sentences.keys())) + 1  # 当前mention所在句子的后窗口范围个句子
     return ([sentences[_id]
              for _id in range(lookback, lookforward)], sentence_id - lookback)
-
-
-def get_target_sentence(sentence, trigger_id):
-    import nltk
-    # nltk.download('punkt')
-    text = sentence
-    sentences = nltk.sent_tokenize(text)
-    # print(sentences)
-    # 给定索引位置
-    word_index = trigger_id
-
-    # 迭代句子以找到索引位置
-    current_index = 0
-    target_sentence = None
-    count = 0
-
-    for sentence in sentences:
-        if count == 68:
-            print('1')
-            print(sentence)
-        if sentence is None:
-            continue  # 如果句子为 None，跳过
-
-        sentence_length = len(sentence)
-        if current_index <= word_index < current_index + sentence_length:
-            target_sentence = sentence
-            break
-        current_index += sentence_length + 1  # 加1是因为句子之间有空格分隔
-        count += 1
-
-    # print(target_sentence)
-    return target_sentence
 
 
 def structure_pair_dual(id,
@@ -448,21 +346,6 @@ def structure_dataset_for_eval(data_set,
     return tensor_dataset, pairs, doc_dict
 
 
-def structure_data_for_train(df):  # 构建训练数据对
-    with open('/home/yaolong/Rationale4CDECR-main/data_preparation/data_set_in_tensor_no_pad.pkl', 'rb') as file:
-        # 使用 pickle.load() 加载文件中的对象
-        loaded_data = pickle.load(file)
-
-    data_set_in_tensor = loaded_data['data_set_in_tensor']
-    all_syn_adj = loaded_data['all_syn_adj']
-
-    # target_size = 512
-    # padded_arrays = [pad_to_size(arr, target_size) for arr in all_syn_adj]
-
-    # 创建 PairedDataset 实例
-    paired_dataset = PairedDataset(data_set_in_tensor, all_syn_adj)
-    print("训练数据读取完成")
-    return paired_dataset
 
 
 
