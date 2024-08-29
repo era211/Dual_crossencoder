@@ -4,7 +4,7 @@
 '''
 import os
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import random
 import logging
 import itertools
@@ -237,20 +237,25 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
             [record["start_piece_2"] for record in records])
         end_pieces_2 = torch.tensor(
             [record["end_piece_2"] for record in records])
+        embeddings_dev_ment1 = torch.tensor(
+            [record["embeddings_dev_ment1"] for record in records])
+        embeddings_dev_ment2 = torch.tensor(
+            [record["embeddings_dev_ment2"] for record in records])
         all_syn_adj_1 = [record["syn_adj_1"] for record in records]
         all_syn_adj_2 = [record["syn_adj_2"] for record in records]
         tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
-                                           start_pieces_2, end_pieces_2, labels)
+                                           start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
 
         # 创建 PairedDataset 实例
         paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
         dev_dataloader = DataLoader(paired_dataset,
                                     sampler=SequentialSampler(paired_dataset),
                                     batch_size=len(all_syn_adj_1))
-        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj = dev_dataloader
+
+        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = dev_dataloader
         with torch.no_grad():
             out_dict = model(sentences, start_pieces_1, end_pieces_1,
-                                start_pieces_2, end_pieces_2, adj, labels)
+                                start_pieces_2, end_pieces_2, adj1, adj2, all_embeddings_ment1, all_embeddings_ment2, labels)
             mean_prob = torch.mean(out_dict["probabilities"]).item()
             score += mean_prob
     print('判断是否将聚类合并完成：', (score / len(cluster_1)) >= 0.5)
@@ -311,8 +316,7 @@ def transitive_closure_merge(edges, mentions, model, doc_dict, graph,
 
 
 # eval the cross-encoder
-def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
-             epoch_num):
+def evaluate(model, dev_dataloader, dev_pairs, doc_dict, epoch_num):
     global best_score, comparison_set
     model = model.eval()
     offset = 0
@@ -324,11 +328,11 @@ def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
     all_probs = []
     for step, batch in enumerate(tqdm(dev_dataloader, desc="Test Batch")):
         batch = tuple(t.to(model.device) for t in batch)
-        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj= batch
+        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = batch
         if not config_dict["oracle"]:
             with torch.no_grad():
                 out_dict = model(sentences, start_pieces_1, end_pieces_1,
-                                        start_pieces_2, end_pieces_2, adj, labels)
+                                        start_pieces_2, end_pieces_2, adj1, adj2, all_embeddings_ment1, all_embeddings_ment2, labels)
         else:
             out_dict = {
                 "accuracy": 1.0,
@@ -460,7 +464,8 @@ def train_model(df, dev_set):
     #     event_encoder.load_state_dict(params)
     #     event_encoder = event_encoder.to(device).eval()
     #     event_encoder.requires_grad = False
-    model = CoreferenceCrossEncoder(device).to(device)
+    # model = CoreferenceCrossEncoder(device).to(device)
+    model = None
     model_dual = CoreferenceCrossEncoder_DualGCN(device, args=args).to(device)
     train_data_num = len(df)  # baseline: 49864
 
@@ -496,10 +501,10 @@ def train_model(df, dev_set):
         for step, batch in enumerate(batcher):
             batch = tuple(t.to(device) for t in batch)
 
-            sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, adj1, adj2 = batch
+            sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = batch
             if args.DualGCN:
                 out_dict = model_dual(sentences, start_pieces_1, end_pieces_1,
-                                             start_pieces_2, end_pieces_2, adj1, adj2, labels)
+                                             start_pieces_2, end_pieces_2, adj1, adj2, all_embeddings_ment1, all_embeddings_ment2, labels)
             else:
                 penal = None
                 out_dict = model(sentences, start_pieces_1, end_pieces_1,
@@ -531,8 +536,7 @@ def train_model(df, dev_set):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-        evaluate(model_dual, dev_dataloader, dev_pairs, dev_docs,
-                 epoch_idx)
+        evaluate(model_dual, dev_dataloader, dev_pairs, dev_docs, epoch_idx)
 
 
 def main():

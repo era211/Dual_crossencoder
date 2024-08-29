@@ -4,9 +4,11 @@ import traceback
 import pandas as pd
 from tqdm import tqdm, trange
 from absa_parser import headparser
+from transformers import BertTokenizer
 from transformers import RobertaTokenizer, AdamW
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 tokenizer = RobertaTokenizer.from_pretrained("/home/yaolong/PT_MODELS/PT_MODELS/roberta-base")  # tokenizer
+tokenizr_bert = BertTokenizer.from_pretrained('/home/yaolong/PT_MODELS/PT_MODELS/bert-base-uncased')  # max_length=100, dem=768
 from fine_v4 import *
 from torch.utils.data import Dataset, DataLoader
 
@@ -73,6 +75,8 @@ parser.add_argument('--losstype',
                     help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
 parser.add_argument('--alpha', default=0.25, type=float)
 parser.add_argument('--beta', default=0.25, type=float)
+parser.add_argument('--penal_alpha', default=0.25, type=float)
+parser.add_argument('--penal_beta', default=0.25, type=float)
 parser.add_argument('--diff_lr', default=True, action='store_true')
 parser.add_argument('--bert_lr', default=3e-5, type=float)
 parser.add_argument('--learning_rate', default=0.002, type=float)
@@ -211,12 +215,15 @@ def syn_sent1(sentence):
 def structure_data_for_train(df):  # 构建训练数据对
     print('构造训练数据...')
     max_seq_length = 512
+    max_seq_length_ment = 100
     all_data_index = df.index
     all_labels, all_sentences = [], []
     all_start_piece_1, all_end_piece_1 = [], []
     all_start_piece_2, all_end_piece_2 = [], []
     all_syn_adj_ment1 = []
     all_syn_adj_ment2 = []
+    all_embeddings_ment1 = []
+    all_embeddings_ment2 = []
     ment_sentences = []
     for ID in tqdm(all_data_index[:100], desc='structure_train'):
         # get 'label'
@@ -278,12 +285,25 @@ def structure_data_for_train(df):  # 构建训练数据对
         all_labels.append(label)
         all_syn_adj_ment1.append(syn_adj_ment1)
         all_syn_adj_ment2.append(syn_adj_ment2)
-        ment_sentences.append([str(ment_sent_1) + '<SEP> ' + str(ment_sent_2)])
+        # ment_sentences.append([str(ment_sent_1) + '<SEP> ' + str(ment_sent_2)])
+
+        embeddings_ment1 = tokenizer(str(ment_sent_1),
+                               max_length=max_seq_length_ment,
+                               truncation=True,
+                               padding="max_length")["input_ids"]
+        embeddings_ment2 = tokenizer(str(ment_sent_2),
+                               max_length=max_seq_length_ment,
+                               truncation=True,
+                               padding="max_length")["input_ids"]
+
+        all_embeddings_ment1.append(embeddings_ment1)
+        all_embeddings_ment2.append(embeddings_ment2)
 
 
     data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1),
                                        torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2),
-                                       torch.tensor(all_end_piece_2), torch.tensor(all_labels))
+                                       torch.tensor(all_end_piece_2), torch.tensor(all_embeddings_ment1),
+                                       torch.tensor(all_embeddings_ment2), torch.tensor(all_labels))
 
     # 创建 PairedDataset 实例
     paired_dataset = PairedDataset(data_set_in_tensor, all_syn_adj_ment1, all_syn_adj_ment2)
@@ -327,7 +347,7 @@ def structure_pair_dual(mention_1, mention_2, doc_dict, window=config_dict["wind
         sents_2, sent_id_2 = get_sents(doc_dict[mention_2.doc_id].sentences,
                                        mention_2.sent_id, window)
 
-        tokens, token_map, offset_1, offset_2, mention_sent_1, mention_sent_2 = tokenize_and_map_pair(
+        tokens, token_map, offset_1, offset_2, mention_sent_1, mention_sent_2,  embeddings_dev_ment1, embeddings_dev_ment2 = tokenize_and_map_pair(
             # tokens是mention上下文窗口中所有原始句子编码后的token数字序列，token_map是原始句子中每个单词索引和编码的各个token索引之间的映射，其他两个是mention所在句子在token序列中的对应位置
             sents_1, sents_2, sent_id_1, sent_id_2, tokenizer)
 
@@ -356,6 +376,8 @@ def structure_pair_dual(mention_1, mention_2, doc_dict, window=config_dict["wind
             "end_piece_2": [end_piece_2],
             "syn_adj_1": syn_adj_1,
             "syn_adj_2": syn_adj_2,
+            "embeddings_dev_ment1": embeddings_dev_ment1,
+            "embeddings_dev_ment2": embeddings_dev_ment2,
             "ment_sentences": mention_sent_1 + '<SEP>' + mention_sent_2
         }
     except:
@@ -401,14 +423,15 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         [record["start_piece_2"] for record in processed_dataset])
     end_pieces_2 = torch.tensor(
         [record["end_piece_2"] for record in processed_dataset])
-    # id = torch.tensor(
-    #     [record["id"] for record in processed_dataset])
     all_syn_adj_1 = [record["syn_adj_1"] for record in processed_dataset]
     all_syn_adj_2 = [record["syn_adj_2"] for record in processed_dataset]
-    # ment_sentences = [record["ment_sentences"] for record in processed_dataset]
+    embeddings_dev_ment1 = torch.tensor(
+        [record["embeddings_dev_ment1"] for record in processed_dataset])
+    embeddings_dev_ment2 = torch.tensor(
+        [record["embeddings_dev_ment2"] for record in processed_dataset])
     print(labels.sum() / float(labels.shape[0]))
     tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
-                                   start_pieces_2, end_pieces_2, labels)
+                                   start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
 
     # 创建 PairedDataset 实例
     paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
@@ -420,7 +443,7 @@ def pad_to_size(array, target_size):
     return padded_array
 
 def collate_fn(batch):
-    sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels, all_syn_adj_1, all_syn_adj_2  = zip(*batch)
+    sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, all_syn_adj_1, all_syn_adj_2  = zip(*batch)
 
     # 对 all_syn_adj 进行 padding
     target_size = args.adj_pad_size
@@ -435,6 +458,8 @@ def collate_fn(batch):
         torch.stack(end_pieces_1),
         torch.stack(start_pieces_2),
         torch.stack(end_pieces_2),
+        torch.stack(all_embeddings_ment1),  # 100*1024
+        torch.stack(all_embeddings_ment2),
         torch.stack(labels),
         torch.stack(padded_all_syn_adj_1),
         torch.stack(padded_all_syn_adj_2)

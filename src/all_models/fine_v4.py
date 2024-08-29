@@ -58,6 +58,7 @@ def get_raw_strings1(sentences, mention_sentence, mapping=None):
 def tokenize_and_map_pair(sentences_1, sentences_2, mention_sentence_1,
                           mention_sentence_2, tokenizer):
     max_seq_length = 512
+    max_seq_length_ment = 100
     raw_strings_1, mention_offset_1, mapping, mention_sent_1 = get_raw_strings1(
         sentences_1, mention_sentence_1)  # raw_strings_1是mention对应句子上下文窗口中的所有句子的原始内容，
     raw_strings_2, mention_offset_2, mapping, mention_sent_2 = get_raw_strings1(
@@ -67,6 +68,16 @@ def tokenize_and_map_pair(sentences_1, sentences_2, mention_sentence_1,
                            max_length=max_seq_length,
                            truncation=True,
                            padding="max_length")["input_ids"]  # 将mention对的所有上下文窗口中的句子进行编码，得到token编码序列
+    embeddings_dev_ment1 = tokenizer(str(mention_sent_1),
+                           max_length=max_seq_length_ment,
+                           truncation=True,
+                           padding="max_length")["input_ids"]  # 将mention对的所有上下文窗口中的句子进行编码，得到token编码序列
+
+    embeddings_dev_ment2 = tokenizer(str(mention_sent_2),
+                                 max_length=max_seq_length_ment,
+                                 truncation=True,
+                                 padding="max_length")["input_ids"]  # 将mention对的所有上下文窗口中的句子进行编码，得到token编码序列
+
     counter = 0
     new_tokens = tokenizer.convert_ids_to_tokens(embeddings)  # 将编码后的token编码序列转换成token
     for i, token in enumerate(new_tokens):  # 从new_tokens列表中一个一个取出token
@@ -82,7 +93,7 @@ def tokenize_and_map_pair(sentences_1, sentences_2, mention_sentence_1,
         else:
             mapping[counter].append(i)
             continue
-    return embeddings, mapping, mention_offset_1, mention_offset_2, mention_sent_1, mention_sent_2    # 表示原始句子中每个单词的索引与编码成token后该单词对应的各个token的索引之间的映射关系
+    return embeddings, mapping, mention_offset_1, mention_offset_2, mention_sent_1, mention_sent_2, embeddings_dev_ment1, embeddings_dev_ment2    # 表示原始句子中每个单词的索引与编码成token后该单词对应的各个token的索引之间的映射关系
 
 
 class CoreferenceCrossEncoder(nn.Module):
