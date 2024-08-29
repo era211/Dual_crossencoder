@@ -16,5 +16,5 @@ fi
 # train crossencoder
 echo "Train dual_crossencoder"
 
-nohup python -u src/all_models/DualGCN_crossencoder_v3.py --config_path ${config_path} --out_dir ${out_dir}\
-    --mode train --random_seed ${random_seed} --gpu_num ${gpu_num} >${out_dir}/dual_crossencoder_v3.log 2>${out_dir}/dual_crossencoder_v3.progress &
+nohup python -u src/all_models/DualGCN_crossencoder_v4.py --config_path ${config_path} --out_dir ${out_dir}\
+    --mode train --random_seed ${random_seed} --gpu_num ${gpu_num} >${out_dir}/dual_crossencoder_v4.log 2>${out_dir}/dual_crossencoder_v4.progress &
