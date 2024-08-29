@@ -192,16 +192,14 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
         self.gcn_model = GCNModel(device, self.mention_model, opt=args).to(device)
         self.word_embedding_dim = self.mention_model.embeddings.word_embeddings.embedding_dim  # 1024
         self.mention_dim = self.word_embedding_dim * 2  # 2048
-        self.input_dim = int(self.mention_dim * 3)  # 6144
-        # self.input_dim = int(self.mention_dim + 1024)  # 3072
+        self.input_dim = int(self.mention_dim * 4)  # 8192
         self.out_dim = 1
 
         self.dropout = nn.Dropout(p=0.5)
-        self.hidden_layer_0 = nn.Linear(self.input_dim + 1024, self.input_dim)
-        self.hidden_layer_01 = nn.Linear(self.input_dim, self.input_dim)
-        self.hidden_layer_1 = nn.Linear(self.input_dim, self.mention_dim)
-        self.hidden_layer_2 = nn.Linear(self.mention_dim, self.mention_dim)
-        self.out_layer = nn.Linear(self.mention_dim, self.out_dim)
+        self.hidden_layer_0 = nn.Linear(self.input_dim, self.input_dim - 2048)  # (8192-->6144)
+        self.hidden_layer_1 = nn.Linear(self.input_dim - 2048, self.mention_dim)  # (6144-->2048)
+        self.hidden_layer_2 = nn.Linear(self.mention_dim, self.mention_dim)  # (2048-->2048)
+        self.out_layer = nn.Linear(self.mention_dim, self.out_dim)  # (2048-->1)
 
     def get_sentence_vecs(self, sentences):
         expected_transformer_input = self.to_transformer_input(sentences)
@@ -239,6 +237,33 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
             "attention_mask": mask
         }
 
+
+    def peanl(self, adj_ag, adj_dep):
+        adj_ag_T = adj_ag.transpose(1, 2)
+        identity = torch.eye(adj_ag.size(1)).to(self.device)
+        identity = identity.unsqueeze(0).expand(adj_ag.size(0), adj_ag.size(1), adj_ag.size(1))
+        ortho = adj_ag @ adj_ag_T
+
+        for i in range(ortho.size(0)):
+            ortho[i] -= torch.diag(torch.diag(ortho[i]))
+            ortho[i] += torch.eye(ortho[i].size(0)).to(self.device)
+
+        penal = None
+        if self.args.losstype == 'doubleloss':
+            penal1 = (torch.norm(ortho - identity) / adj_ag.size(0)).to(self.device)
+            penal2 = (adj_ag.size(0) / torch.norm(adj_ag - adj_dep)).to(self.device)
+            penal = self.args.alpha * penal1 + self.args.beta * penal2
+
+        elif self.args.losstype == 'orthogonalloss':
+            penal = (torch.norm(ortho - identity) / adj_ag.size(0)).to(self.device)
+            penal = self.args.alpha * penal
+
+        elif self.args.losstype == 'differentiatedloss':
+            penal = (adj_ag.size(0) / torch.norm(adj_ag - adj_dep)).to(self.device)
+            penal = self.args.beta * penal
+
+        return penal
+
     def forward(self,
                 sentences,
                 start_pieces_1,
@@ -247,24 +272,30 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
                 end_pieces_2,
                 adj1,
                 adj2,
+                all_embeddings_ment1,
+                all_embeddings_ment2,
                 labels=None):
         transformer_output = self.get_sentence_vecs(sentences)  # 得到最后一层表示，（10，512，1024）
+
+        transformer_output_ment1 = self.get_sentence_vecs(all_embeddings_ment1)  # 得到最后一层表示，（10，100，1024）
+        transformer_output_ment2 = self.get_sentence_vecs(all_embeddings_ment2)
+
         mention_reps_1 = self.get_mention_rep(transformer_output,
                                               start_pieces_1, end_pieces_1)  # (10,2048)  # 得到事件触发词的特征向量
         mention_reps_2 = self.get_mention_rep(transformer_output,
                                               start_pieces_2, end_pieces_2)  # (10,1024*2)
-        outputs1, outputs2, adj_ag, adj_dep, pooled_output = self.gcn_model(transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj1, adj2)
+
+        outputs1_1, outputs1_2, outputs2_1, outputs2_2, adj_ag_1, adj_ag_2, adj1, adj2 = self.gcn_model(transformer_output_ment1, transformer_output_ment2, start_pieces_1, end_pieces_1,
+                                                                            start_pieces_2, end_pieces_2, adj1, adj2,
+                                                                            all_embeddings_ment1, all_embeddings_ment2)
+
         # outputs1:(10,512)
         combined_rep = torch.cat(
-            [outputs1, outputs2, mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
-            dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)|(10, 512+512+1024*2+1024*2+1024*2)->(10,6144+1024)
-        # combined_rep = torch.cat(
-        #     [outputs1, outputs2, mention_reps_1 * mention_reps_2],
-        #     dim=1)   # (10, 512+512+1024*2)->(10,2048+1024)
+            [outputs1_1, outputs1_2, outputs2_1, outputs2_2, mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
+            dim=1)  # (10, 512*4+2048*3)
         combined_rep = combined_rep
         zero_hidden = F.relu(self.hidden_layer_0(combined_rep))
-        zero1_hidden = F.relu(self.hidden_layer_01(zero_hidden))
-        first_hidden = F.relu(self.hidden_layer_1(zero1_hidden))
+        first_hidden = F.relu(self.hidden_layer_1(zero_hidden))
         second_hidden = F.relu(self.hidden_layer_2(first_hidden))
         out = self.out_layer(second_hidden)
         probs = F.sigmoid(out)
@@ -292,33 +323,14 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
                 f1_score = 0.0
                 precision = torch.tensor(1.0).to(self.device)
 
-            adj_ag_T = adj_ag.transpose(1, 2)
-            identity = torch.eye(adj_ag.size(1)).to(self.device)
-            identity = identity.unsqueeze(0).expand(adj_ag.size(0), adj_ag.size(1), adj_ag.size(1))
-            ortho = adj_ag @ adj_ag_T
+            penal1 = self.penal(adj_ag_1, adj1)
+            penal2 = self.penal(adj_ag_2, adj2)
 
-            for i in range(ortho.size(0)):
-                ortho[i] -= torch.diag(torch.diag(ortho[i]))
-                ortho[i] += torch.eye(ortho[i].size(0)).to(self.device)
-
-            penal = None
-            if self.args.losstype == 'doubleloss':
-                penal1 = (torch.norm(ortho - identity) / adj_ag.size(0)).to(self.device)
-                penal2 = (adj_ag.size(0) / torch.norm(adj_ag - adj_dep)).to(self.device)
-                penal = self.args.alpha * penal1 + self.args.beta * penal2
-
-            elif self.args.losstype == 'orthogonalloss':
-                penal = (torch.norm(ortho - identity) / adj_ag.size(0)).to(self.device)
-                penal = self.args.alpha * penal
-
-            elif self.args.losstype == 'differentiatedloss':
-                penal = (adj_ag.size(0) / torch.norm(adj_ag - adj_dep)).to(self.device)
-                penal = self.args.beta * penal
             output_dict["accuracy"] = acc
             output_dict["precision"] = precision
             output_dict["recall"] = recall
             output_dict["f1_score"] = f1_score
-            loss = loss_fct(out, labels) + penal
+            loss = loss_fct(out, labels) + self.args.penal_alpha*penal1 + self.args.penal_beta*penal2
             output_dict["loss"] = loss
 
 
@@ -348,19 +360,27 @@ class GCNModel(nn.Module):
         self.device = device
         self.gcn = GCNBert(device, bert, opt, opt.num_layers).to(device)
 
-    def forward(self, transformer_output, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, adj1, adj2):
-        h1, h2, adj_ag, pooled_output = self.gcn(transformer_output, adj1, sentences)
-        h1, h2, adj_ag, pooled_output = self.gcn(transformer_output, adj2, sentences)
+    def avg_pooling(self, h1, h2, sent):
+        mask = sent != 1  # (10, 100)句子部分为1，padding部分为0
+        mask = torch.tensor(mask, dtype=torch.bool)
+        asp_wn = mask.sum(dim=1).unsqueeze(-1)  # (10, 1)
+        aspect_mask = mask.unsqueeze(-1).repeat(1, 1, self.opt.bert_dim // 2)  # (10, 100, 512)
+        outputs1 = (h1 * aspect_mask).sum(dim=1) / asp_wn  # (10, 512)
+        outputs2 = (h2 * aspect_mask).sum(dim=1) / asp_wn
+        return outputs1, outputs2
+
+    def forward(self, transformer_output_ment1, transformer_output_ment2, start_pieces_1, end_pieces_1,
+                                                start_pieces_2, end_pieces_2, adj1, adj2,
+                                                all_embeddings_ment1, all_embeddings_ment2):
+        h1_1, h2_1, adj_ag_1, pooled_output_1 = self.gcn(transformer_output_ment1, adj1, all_embeddings_ment1)
+        h1_2, h2_2, adj_ag_2, pooled_output_2 = self.gcn(transformer_output_ment2, adj2, all_embeddings_ment2)
 
 
         # avg pooling asp feature
-        mask = sentences != 1  # (10, 512)句子部分为1，padding部分为0
-        mask = torch.tensor(mask, dtype=torch.bool)
-        asp_wn = mask.sum(dim=1).unsqueeze(-1)  # (10, 1)
-        aspect_mask = mask.unsqueeze(-1).repeat(1, 1, self.opt.bert_dim // 2)  # (10, 512, 512)
-        outputs1 = (h1 * aspect_mask).sum(dim=1) / asp_wn  # (10, 512)
-        outputs2 = (h2 * aspect_mask).sum(dim=1) / asp_wn
-        return outputs1, outputs2, adj_ag, adj1, pooled_output
+        outputs1_1, outputs1_2 = self.avg_pooling(h1_1, h2_1, transformer_output_ment1)
+        outputs2_1, outputs2_2 = self.avg_pooling(h1_2, h2_2, transformer_output_ment2)
+
+        return outputs1_1, outputs1_2, outputs2_1, outputs2_2, adj_ag_1, adj_ag_2, adj1, adj2
 
 
 class GCNBert(nn.Module):
@@ -408,22 +428,17 @@ class GCNBert(nn.Module):
             "attention_mask": mask
         }
 
-    def forward(self, transformer_output, adj, sentences):
-        # text_bert_indices, bert_segments_ids, attention_mask, asp_start, asp_end, adj_dep, src_mask, aspect_mask = inputs
-        mask = sentences != 1  # 句子部分为1，padding部分为0
-        src_mask = mask.unsqueeze(-2) # (10, 512)-->(10, 1, 512)
-
-        # sequence_output, pooled_output = self.bert(text_bert_indices, attention_mask=attention_mask,
-        #                                            token_type_ids=bert_segments_ids)  # 对token_id进行编码  sequence_output:(16,100,768), pooled_output:(16,768),
-        # transformer_output:得到最后一层表示，（10，512，1024）
-        sequence_output = self.layernorm(transformer_output)  # (10，512，1024)对bert输出进行层归一化
-        gcn_inputs = self.bert_drop(sequence_output)  # (10, 512, 1024)将归一化后的输出进行dropout操作，然后作为后续图神经网络的输入
-        pooled_output = transformer_output[:, 0, :]  # (10, 1024)
+    def forward(self, transformer_output_ment, adj, all_embeddings_ment):
+        mask = all_embeddings_ment != 1  # 句子部分为1，padding部分为0
+        src_mask = mask.unsqueeze(-2) # (10, 100)-->(10, 1, 100)
+        sequence_output = self.layernorm(transformer_output_ment)  # (10，100，1024)对bert输出进行层归一化
+        gcn_inputs = self.bert_drop(sequence_output)  # (10, 100, 1024)将归一化后的输出进行dropout操作，然后作为后续图神经网络的输入
+        pooled_output = transformer_output_ment[:, 0, :]  # (10, 1024)
         pooled_output = self.pooled_drop(pooled_output)  # 对输出的cls编码进行dropout操作
 
-        denom_dep = adj.sum(2).unsqueeze(2) + 1  # (10, 512, 1)用于语法图卷积
-        attn_tensor = self.attn(gcn_inputs, gcn_inputs, src_mask)   # (10,1,512,512) 将输入进行多头注意力操作
-        attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]  # list:(10, 512,512)
+        denom_dep = adj.sum(2).unsqueeze(2) + 1  # (10, 100, 1)用于语法图卷积
+        attn_tensor = self.attn(gcn_inputs, gcn_inputs, src_mask)   # (10,1,100,100) 将输入进行多头注意力操作
+        attn_adj_list = [attn_adj.squeeze(1) for attn_adj in torch.split(attn_tensor, 1, dim=1)]  # list:(10, 100,100)
         multi_head_list = []
         outputs_dep = None
         adj_ag = None
@@ -431,7 +446,7 @@ class GCNBert(nn.Module):
         # * Average Multi-head Attention matrixes
         for i in range(self.attention_heads):
             if adj_ag is None:
-                adj_ag = attn_adj_list[i]  # (10, 512, 512)
+                adj_ag = attn_adj_list[i]  # (10, 100, 100)
             else:
                 adj_ag = adj_ag + attn_adj_list[i]
         adj_ag = adj_ag / self.attention_heads
@@ -441,17 +456,17 @@ class GCNBert(nn.Module):
             adj_ag[j] = adj_ag[j] + torch.eye(adj_ag[j].size(0)).to(self.device)
         adj_ag = src_mask.transpose(1, 2) * adj_ag
 
-        denom_ag = adj_ag.sum(2).unsqueeze(2) + 1  # (10, 512 ,1)
+        denom_ag = adj_ag.sum(2).unsqueeze(2) + 1  # (10, 100 ,1)
         outputs_ag = gcn_inputs
         outputs_dep = gcn_inputs
         adj = adj.to(torch.float32)
 
         for l in range(self.layers):
             # ************SynGCN*************
-            Ax_dep = adj.bmm(outputs_dep)  # adj:(10,512,512), outputs_dep:(10, 512, 1024)
-            AxW_dep = self.W[l](Ax_dep)
+            Ax_dep = adj.bmm(outputs_dep)  # adj:(10,100,100), outputs_dep:(10, 100, 1024)
+            AxW_dep = self.W[l](Ax_dep)  # (10, 100, 512)
             AxW_dep = AxW_dep / denom_dep
-            gAxW_dep = F.relu(AxW_dep).to(torch.float32)
+            gAxW_dep = F.relu(AxW_dep).to(torch.float32)  # (10, 100, 512)
 
             # ************SemGCN*************
             Ax_ag = adj_ag.bmm(outputs_ag)
