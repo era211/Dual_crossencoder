@@ -85,26 +85,6 @@ comparison_set = set()
 tokenizer = RobertaTokenizer.from_pretrained("/home/yaolong/PT_MODELS/PT_MODELS/roberta-base")  # tokenizer
 # 这个tokenizer在哪里使用了：构建训练句子对的时候，对句子对进行token化
 
-def structer_adj_dep(sentences, batch):
-    print('构造adj...')
-    all_syn_adj = []
-    for id in trange(int(config_dict["batch_size"])):
-        ID = batch[6][id][0]
-        sent = sentences[ID]
-        syn_adj = syn_sent1(str(sent))
-        all_syn_adj.append(syn_adj)
-    all_syn_adj = torch.tensor(all_syn_adj)
-    return all_syn_adj  # (10,512,512)
-
-def structer_adj_dep_dev(sentences, batch):
-    print('dev构造adj...')
-    all_syn_adj = []
-    for id in range(len(batch)):
-        ID = batch['id'][id][0]
-        syn_adj = syn_sent1(sentences[ID])
-        all_syn_adj.append(syn_adj)
-    all_syn_adj = torch.tensor(all_syn_adj)
-    return all_syn_adj
 
 def get_optimizer(model):
     '''
