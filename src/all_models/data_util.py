@@ -225,7 +225,7 @@ def structure_data_for_train(df):  # 构建训练数据对
     all_embeddings_ment1 = []
     all_embeddings_ment2 = []
     ment_sentences = []
-    for ID in tqdm(all_data_index[:100], desc='structure_train'):
+    for ID in tqdm(all_data_index, desc='structure_train'):
         # get 'label'
         label = [float(df['label'][ID])]
         # get 'sentence'
@@ -407,7 +407,7 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
             eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
     pairs = list(pairs)  # 将字典类型转换为列表类型
     id = 0
-    for mention_1, mention_2 in tqdm(pairs[:50]):  # 从提及对数据列表中分别读取每一对mention
+    for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
         record = structure_pair_dual(mention_1, mention_2,
                                      doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
         processed_dataset.append(record)
