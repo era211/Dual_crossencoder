@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.init as init
 import torch.autograd as autograd
 from transformers import RobertaModel
 from coarse import EncoderCosineRanker
@@ -249,7 +250,7 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
         }
 
 
-    def peanl(self, adj_ag, adj_dep):
+    def penal(self, adj_ag, adj_dep):
         adj_ag_T = adj_ag.transpose(1, 2)
         identity = torch.eye(adj_ag.size(1)).to(self.device)
         identity = identity.unsqueeze(0).expand(adj_ag.size(0), adj_ag.size(1), adj_ag.size(1))
@@ -386,10 +387,10 @@ class GCNModel(nn.Module):
         h1_1, h2_1, adj_ag_1, pooled_output_1 = self.gcn(transformer_output_ment1, adj1, all_embeddings_ment1)
         h1_2, h2_2, adj_ag_2, pooled_output_2 = self.gcn(transformer_output_ment2, adj2, all_embeddings_ment2)
 
-
+        # h1:(10, 100, 512)  h2:(10, 100, 512)   transformer_output_ment1:(10, 100, 1024)
         # avg pooling asp feature
-        outputs1_1, outputs1_2 = self.avg_pooling(h1_1, h2_1, transformer_output_ment1)
-        outputs2_1, outputs2_2 = self.avg_pooling(h1_2, h2_2, transformer_output_ment2)
+        outputs1_1, outputs1_2 = self.avg_pooling(h1_1, h2_1, all_embeddings_ment1)
+        outputs2_1, outputs2_2 = self.avg_pooling(h1_2, h2_2, all_embeddings_ment2)
 
         return outputs1_1, outputs1_2, outputs2_1, outputs2_2, adj_ag_1, adj_ag_2, adj1, adj2
 
@@ -423,6 +424,8 @@ class GCNBert(nn.Module):
 
         self.affine1 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
         self.affine2 = nn.Parameter(torch.Tensor(self.mem_dim, self.mem_dim))
+        init.xavier_uniform_(self.affine1)  # 初始化
+        init.xavier_uniform_(self.affine2)
 
     def get_sentence_vecs(self, sentences):
         expected_transformer_input = self.to_transformer_input(sentences)
@@ -465,10 +468,10 @@ class GCNBert(nn.Module):
         for j in range(adj_ag.size(0)):
             adj_ag[j] = adj_ag[j] - torch.diag(torch.diag(adj_ag[j]))
             adj_ag[j] = adj_ag[j] + torch.eye(adj_ag[j].size(0)).to(self.device)
-        adj_ag = src_mask.transpose(1, 2) * adj_ag
+        adj_ag = src_mask.transpose(1, 2) * adj_ag  # (10, 100, 100)
 
         denom_ag = adj_ag.sum(2).unsqueeze(2) + 1  # (10, 100 ,1)
-        outputs_ag = gcn_inputs
+        outputs_ag = gcn_inputs  # (10, 100, 1024)
         outputs_dep = gcn_inputs
         adj = adj.to(torch.float32)
 
@@ -486,11 +489,17 @@ class GCNBert(nn.Module):
             gAxW_ag = F.relu(AxW_ag)
 
             # * mutual Biaffine module
-            A1 = F.softmax(torch.bmm(torch.matmul(gAxW_dep, self.affine1), torch.transpose(gAxW_ag, 1, 2)), dim=-1)
-            A2 = F.softmax(torch.bmm(torch.matmul(gAxW_ag, self.affine2), torch.transpose(gAxW_dep, 1, 2)), dim=-1)
+            pre_softmax_A1 = torch.bmm(torch.matmul(gAxW_dep, self.affine1), torch.transpose(gAxW_ag, 1, 2))
+            pre_softmax_A1 = pre_softmax_A1 - pre_softmax_A1.max(dim=-1, keepdim=True)[0]
+            A1 = F.softmax(pre_softmax_A1, dim=-1)
+            # A1 = F.softmax(torch.bmm(torch.matmul(gAxW_dep, self.affine1), torch.transpose(gAxW_ag, 1, 2)), dim=-1)  # (10, 100, 100)
+            pre_softmax_A2 = torch.bmm(torch.matmul(gAxW_ag, self.affine2), torch.transpose(gAxW_dep, 1, 2))
+            pre_softmax_A2 = pre_softmax_A2 - pre_softmax_A2.max(dim=-1, keepdim=True)[0]
+            A2 = F.softmax(pre_softmax_A2, dim=-1)
+            # A2 = F.softmax(torch.bmm(torch.matmul(gAxW_ag, self.affine2), torch.transpose(gAxW_dep, 1, 2)), dim=-1)
             gAxW_dep, gAxW_ag = torch.bmm(A1, gAxW_ag), torch.bmm(A2, gAxW_dep)
             outputs_dep = self.gcn_drop(gAxW_dep) if l < self.layers - 1 else gAxW_dep
-            outputs_ag = self.gcn_drop(gAxW_ag) if l < self.layers - 1 else gAxW_ag
+            outputs_ag = self.gcn_drop(gAxW_ag) if l < self.layers - 1 else gAxW_ag  # (10, 100, 51)
 
         return outputs_ag, outputs_dep, adj_ag, pooled_output
 
