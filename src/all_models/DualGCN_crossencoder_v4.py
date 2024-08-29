@@ -559,7 +559,7 @@ def main():
             eval_model_path = config_dict['eval_model_path']
         with open(eval_model_path, 'rb') as f:
             params = torch.load(f)
-            model = CoreferenceCrossEncoder(device)
+            model = CoreferenceCrossEncoder_DualGCN(device, args=args)
             model.load_state_dict(params)
             model = model.to(device).eval()
             model.requires_grad = False
@@ -568,7 +568,7 @@ def main():
         test_dataloader = DataLoader(test_event_pairs,
                                      sampler=SequentialSampler(test_event_pairs),  # 顺序采样
                                      batch_size=config_dict["batch_size"])
-        evaluate(model, event_encoder, test_dataloader, test_pairs, test_docs, 0)
+        evaluate(model, test_dataloader, test_pairs, test_docs, 0)
 
 
 if __name__ == '__main__':
