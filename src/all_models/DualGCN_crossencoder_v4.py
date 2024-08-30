@@ -307,6 +307,7 @@ def evaluate(model, dev_dataloader, dev_pairs, doc_dict, epoch_num):
     mentions = set()
     acc_sum = 0.0
     all_probs = []
+    print('eval the cross-encoder...')
     for step, batch in enumerate(tqdm(dev_dataloader, desc="Test Batch")):
         batch = tuple(t.to(model.device) for t in batch)
         sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = batch
@@ -420,6 +421,7 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
             # save the edges linking coreferential events on the dev corpus
             with open(os.path.join(args.out_dir, "crossencoder_dev_edges"), "wb") as f:
                 cPickle.dump(saved_edges, f)
+            print('模型参数保存成功...')
         else:  # During Test
             # save the edges linking coreferential events on the test corpus
             with open(os.path.join(args.out_dir, "crossencoder_test_edges"), "wb") as f:
