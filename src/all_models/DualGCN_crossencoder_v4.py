@@ -230,7 +230,8 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
         paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
         dev_dataloader = DataLoader(paired_dataset,
                                     sampler=SequentialSampler(paired_dataset),
-                                    batch_size=len(all_syn_adj_1))
+                                    batch_size=len(all_syn_adj_1),
+                                    collate_fn=collate_fn)
 
         sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = dev_dataloader
         with torch.no_grad():
@@ -464,7 +465,8 @@ def train_model(df, dev_set):
                                   collate_fn=collate_fn)
     dev_dataloader = DataLoader(dev_event_pairs,
                                 sampler=SequentialSampler(dev_event_pairs),
-                                batch_size=config_dict["batch_size"])
+                                batch_size=config_dict["batch_size"],
+                                collate_fn=collate_fn)
     for epoch_idx in trange(int(config_dict["epochs"]),
                             desc="Epoch",
                             leave=True):
