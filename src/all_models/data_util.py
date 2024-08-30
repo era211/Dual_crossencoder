@@ -1,6 +1,8 @@
 import json
 import argparse
 import traceback
+import pickle
+import pickle as cPickle
 import pandas as pd
 from tqdm import tqdm, trange
 from absa_parser import headparser
@@ -73,6 +75,7 @@ parser.add_argument('--losstype',
                     type=str,
                     default='doubleloss',
                     help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
+parser.add_argument('--load_data', default=True, type=bool, help='load data')
 parser.add_argument('--alpha', default=0.25, type=float)
 parser.add_argument('--beta', default=0.25, type=float)
 parser.add_argument('--penal_alpha', default=0.25, type=float)
@@ -213,97 +216,126 @@ def syn_sent1(sentence):
 
 
 def structure_data_for_train(df):  # 构建训练数据对
-    print('构造训练数据...')
-    max_seq_length = 512
-    max_seq_length_ment = 100
-    all_data_index = df.index
-    all_labels, all_sentences = [], []
-    all_start_piece_1, all_end_piece_1 = [], []
-    all_start_piece_2, all_end_piece_2 = [], []
-    all_syn_adj_ment1 = []
-    all_syn_adj_ment2 = []
-    all_embeddings_ment1 = []
-    all_embeddings_ment2 = []
-    ment_sentences = []
-    for ID in tqdm(all_data_index, desc='structure_train'):
-        # get 'label'
-        label = [float(df['label'][ID])]
-        # get 'sentence'
-        sentences_text_1 = df['text_1'][ID]
-        sentences_text_2 = df['text_2'][ID]
-        text_1_length = len(sentences_text_1.split(' '))
-        embeddings = tokenizer(sentences_text_1,
-                               sentences_text_2,
-                               max_length=max_seq_length,
-                               truncation=True,
-                               padding="max_length")["input_ids"]
-        # get start/end_piece_1/2
-        counter = 0
-        new_tokens = tokenizer.convert_ids_to_tokens(embeddings)  # 将编码数字转换为对应的token
-        total_tokens_num = df['total_tokens_num'][ID]
-        token_map = dict(list(map(lambda x: (x, []), np.arange(
-            total_tokens_num))))  # 以第一句为例，句子1和句子2的总长度为173，tokenizer后得到新的token，包括原本词和子词，所以这里将新产生的token分别与原来的173个词对应起来
-        for i, token in enumerate(new_tokens):
-            if ((i + 1) < len(new_tokens) - 1) and (new_tokens[i] == "</s>") and (new_tokens[i + 1] == "</s>"):
-                counter = text_1_length - 1
+    if not args.load_data:
+        print('构造训练数据...')
+        max_seq_length = 512
+        max_seq_length_ment = 100
+        all_data_index = df.index
+        all_labels, all_sentences = [], []
+        all_start_piece_1, all_end_piece_1 = [], []
+        all_start_piece_2, all_end_piece_2 = [], []
+        all_syn_adj_ment1 = []
+        all_syn_adj_ment2 = []
+        all_embeddings_ment1 = []
+        all_embeddings_ment2 = []
+        ment_sentences = []
+        for ID in tqdm(all_data_index, desc='structure_train'):
+            # get 'label'
+            label = [float(df['label'][ID])]
+            # get 'sentence'
+            sentences_text_1 = df['text_1'][ID]
+            sentences_text_2 = df['text_2'][ID]
+            text_1_length = len(sentences_text_1.split(' '))
+            embeddings = tokenizer(sentences_text_1,
+                                   sentences_text_2,
+                                   max_length=max_seq_length,
+                                   truncation=True,
+                                   padding="max_length")["input_ids"]
+            # get start/end_piece_1/2
+            counter = 0
+            new_tokens = tokenizer.convert_ids_to_tokens(embeddings)  # 将编码数字转换为对应的token
+            total_tokens_num = df['total_tokens_num'][ID]
+            token_map = dict(list(map(lambda x: (x, []), np.arange(
+                total_tokens_num))))  # 以第一句为例，句子1和句子2的总长度为173，tokenizer后得到新的token，包括原本词和子词，所以这里将新产生的token分别与原来的173个词对应起来
+            for i, token in enumerate(new_tokens):
+                if ((i + 1) < len(new_tokens) - 1) and (new_tokens[i] == "</s>") and (new_tokens[i + 1] == "</s>"):
+                    counter = text_1_length - 1
+                else:
+                    pass
+                if token == "<s>" or token == "</s>" or token == "<pad>":
+                    continue
+                elif token[0] == "Ġ" or new_tokens[i - 1] == "</s>":
+                    counter += 1
+                    token_map[counter].append(i)
+                else:
+                    token_map[counter].append(i)
+                    continue
+            trigger_1_abs_start = df['trigger_1_abs_start'][ID]
+            trigger_1_abs_end = df['trigger_1_abs_end'][ID]
+            trigger_2_abs_start = df['trigger_2_abs_start'][ID]
+            trigger_2_abs_end = df['trigger_2_abs_end'][ID]
+            ##get start/end_piece_1
+            start_piece_1 = token_map[trigger_1_abs_start][0]  # 得到新token后的触发词的索引
+            if trigger_1_abs_end in token_map:
+                end_piece_1 = token_map[trigger_1_abs_end][-1]
             else:
-                pass
-            if token == "<s>" or token == "</s>" or token == "<pad>":
-                continue
-            elif token[0] == "Ġ" or new_tokens[i - 1] == "</s>":
-                counter += 1
-                token_map[counter].append(i)
+                end_piece_1 = token_map[trigger_1_abs_start][-1]
+            start_piece_2 = token_map[trigger_2_abs_start][0]
+            if trigger_2_abs_end in token_map:
+                end_piece_2 = token_map[trigger_2_abs_end][-1]
             else:
-                token_map[counter].append(i)
-                continue
-        trigger_1_abs_start = df['trigger_1_abs_start'][ID]
-        trigger_1_abs_end = df['trigger_1_abs_end'][ID]
-        trigger_2_abs_start = df['trigger_2_abs_start'][ID]
-        trigger_2_abs_end = df['trigger_2_abs_end'][ID]
-        ##get start/end_piece_1
-        start_piece_1 = token_map[trigger_1_abs_start][0]  # 得到新token后的触发词的索引
-        if trigger_1_abs_end in token_map:
-            end_piece_1 = token_map[trigger_1_abs_end][-1]
-        else:
-            end_piece_1 = token_map[trigger_1_abs_start][-1]
-        start_piece_2 = token_map[trigger_2_abs_start][0]
-        if trigger_2_abs_end in token_map:
-            end_piece_2 = token_map[trigger_2_abs_end][-1]
-        else:
-            end_piece_2 = token_map[trigger_2_abs_start][-1]
-        ment_sent_1 = get_target_sentence(sentences_text_1, trigger_1_abs_start)
-        ment_sent_2 = get_target_sentence(sentences_text_2, trigger_2_abs_start)
+                end_piece_2 = token_map[trigger_2_abs_start][-1]
+            ment_sent_1 = get_target_sentence(sentences_text_1, trigger_1_abs_start)
+            ment_sent_2 = get_target_sentence(sentences_text_2, trigger_2_abs_start)
 
-        syn_adj_ment1 = syn_sent1(str(ment_sent_1))
-        syn_adj_ment2 = syn_sent1(str(ment_sent_2))
+            syn_adj_ment1 = syn_sent1(str(ment_sent_1))
+            syn_adj_ment2 = syn_sent1(str(ment_sent_2))
 
-        all_sentences.append(embeddings)  # 两个句子的编码
-        all_start_piece_1.append([start_piece_1])
-        all_end_piece_1.append([end_piece_1])
-        all_start_piece_2.append([start_piece_2])
-        all_end_piece_2.append([end_piece_2])
-        all_labels.append(label)
-        all_syn_adj_ment1.append(syn_adj_ment1)
-        all_syn_adj_ment2.append(syn_adj_ment2)
-        # ment_sentences.append([str(ment_sent_1) + '<SEP> ' + str(ment_sent_2)])
+            all_sentences.append(embeddings)  # 两个句子的编码
+            all_start_piece_1.append([start_piece_1])
+            all_end_piece_1.append([end_piece_1])
+            all_start_piece_2.append([start_piece_2])
+            all_end_piece_2.append([end_piece_2])
+            all_labels.append(label)
+            all_syn_adj_ment1.append(syn_adj_ment1)
+            all_syn_adj_ment2.append(syn_adj_ment2)
+            # ment_sentences.append([str(ment_sent_1) + '<SEP> ' + str(ment_sent_2)])
 
-        embeddings_ment1 = tokenizer(str(ment_sent_1),
-                               max_length=max_seq_length_ment,
-                               truncation=True,
-                               padding="max_length")["input_ids"]
-        embeddings_ment2 = tokenizer(str(ment_sent_2),
-                               max_length=max_seq_length_ment,
-                               truncation=True,
-                               padding="max_length")["input_ids"]
+            embeddings_ment1 = tokenizer(str(ment_sent_1),
+                                   max_length=max_seq_length_ment,
+                                   truncation=True,
+                                   padding="max_length")["input_ids"]
+            embeddings_ment2 = tokenizer(str(ment_sent_2),
+                                   max_length=max_seq_length_ment,
+                                   truncation=True,
+                                   padding="max_length")["input_ids"]
 
-        all_embeddings_ment1.append(embeddings_ment1)
-        all_embeddings_ment2.append(embeddings_ment2)
+            all_embeddings_ment1.append(embeddings_ment1)
+            all_embeddings_ment2.append(embeddings_ment2)
 
 
-    data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1),
-                                       torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2),
-                                       torch.tensor(all_end_piece_2), torch.tensor(all_embeddings_ment1),
-                                       torch.tensor(all_embeddings_ment2), torch.tensor(all_labels))
+        data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1),
+                                           torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2),
+                                           torch.tensor(all_end_piece_2), torch.tensor(all_embeddings_ment1),
+                                           torch.tensor(all_embeddings_ment2), torch.tensor(all_labels))
+        # 将数据打包进一个字典
+        data_dict = {
+            'all_syn_adj_ment1': all_syn_adj_ment1,
+            'all_syn_adj_ment2': all_syn_adj_ment2,
+            'data_set_in_tensor': data_set_in_tensor
+            }
+
+        # 保存字典到 .pkl 文件
+        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/train_data.pkl'  # 文件路径
+        with open(file_path, 'wb') as f:
+            pickle.dump(data_dict, f)
+        print("数据已成功保存到文件。")
+
+    else:
+        print('加载数据...')
+        # 指定文件路径
+        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/train_data.pkl'
+
+        # 打开文件并加载数据
+        with open(file_path, 'rb') as f:
+            data_dict = pickle.load(f)
+
+        # 现在可以从字典中获取各个数据
+        all_syn_adj_ment1 = data_dict['all_syn_adj_ment1']
+        all_syn_adj_ment2 = data_dict['all_syn_adj_ment2']
+        data_set_in_tensor = data_dict['data_set_in_tensor']
+
+        print("数据已成功从文件中读取...")
 
     # 创建 PairedDataset 实例
     paired_dataset = PairedDataset(data_set_in_tensor, all_syn_adj_ment1, all_syn_adj_ment2)
@@ -406,32 +438,63 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         pairs = nn_generated_fixed_eval_pairs[test_set_name][
             eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
     pairs = list(pairs)  # 将字典类型转换为列表类型
-    id = 0
-    for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
-        record = structure_pair_dual(mention_1, mention_2,
-                                     doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
-        processed_dataset.append(record)
-        id = id + 1
-    sentences = torch.tensor(
-        [record["sentence"] for record in processed_dataset])
-    labels = torch.tensor([record["label"] for record in processed_dataset])
-    start_pieces_1 = torch.tensor(
-        [record["start_piece_1"] for record in processed_dataset])
-    end_pieces_1 = torch.tensor(
-        [record["end_piece_1"] for record in processed_dataset])
-    start_pieces_2 = torch.tensor(
-        [record["start_piece_2"] for record in processed_dataset])
-    end_pieces_2 = torch.tensor(
-        [record["end_piece_2"] for record in processed_dataset])
-    all_syn_adj_1 = [record["syn_adj_1"] for record in processed_dataset]
-    all_syn_adj_2 = [record["syn_adj_2"] for record in processed_dataset]
-    embeddings_dev_ment1 = torch.tensor(
-        [record["embeddings_dev_ment1"] for record in processed_dataset])
-    embeddings_dev_ment2 = torch.tensor(
-        [record["embeddings_dev_ment2"] for record in processed_dataset])
-    print(labels.sum() / float(labels.shape[0]))
-    tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
-                                   start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
+
+    if not args.load_data:
+        id = 0
+        for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
+            record = structure_pair_dual(mention_1, mention_2,
+                                         doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
+            processed_dataset.append(record)
+            id = id + 1
+        sentences = torch.tensor(
+            [record["sentence"] for record in processed_dataset])
+        labels = torch.tensor([record["label"] for record in processed_dataset])
+        start_pieces_1 = torch.tensor(
+            [record["start_piece_1"] for record in processed_dataset])
+        end_pieces_1 = torch.tensor(
+            [record["end_piece_1"] for record in processed_dataset])
+        start_pieces_2 = torch.tensor(
+            [record["start_piece_2"] for record in processed_dataset])
+        end_pieces_2 = torch.tensor(
+            [record["end_piece_2"] for record in processed_dataset])
+        all_syn_adj_1 = [record["syn_adj_1"] for record in processed_dataset]
+        all_syn_adj_2 = [record["syn_adj_2"] for record in processed_dataset]
+        embeddings_dev_ment1 = torch.tensor(
+            [record["embeddings_dev_ment1"] for record in processed_dataset])
+        embeddings_dev_ment2 = torch.tensor(
+            [record["embeddings_dev_ment2"] for record in processed_dataset])
+        print(labels.sum() / float(labels.shape[0]))
+        tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
+                                       start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
+
+        # 将数据打包进一个字典
+        data_dict = {
+            'all_syn_adj_1': all_syn_adj_1,
+            'all_syn_adj_2': all_syn_adj_2,
+            'tensor_dataset_dev': tensor_dataset_dev
+            }
+
+        # 保存字典到 .pkl 文件
+        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/dev_data.pkl'  # 文件路径
+        with open(file_path, 'wb') as f:
+            pickle.dump(data_dict, f)
+        print("数据已成功保存到文件。")
+
+    else:
+        print('读取dev数据..')
+        # 指定文件路径
+        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/dev_data.pkl'
+
+        # 打开文件并加载数据
+        with open(file_path, 'rb') as f:
+            data_dict = pickle.load(f)
+
+        # 现在可以从字典中获取各个数据
+        all_syn_adj_1 = data_dict['all_syn_adj_1']
+        all_syn_adj_2 = data_dict['all_syn_adj_2']
+        tensor_dataset_dev = data_dict['tensor_dataset_dev']
+
+        print("数据已成功从文件中读取...")
 
     # 创建 PairedDataset 实例
     paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
@@ -439,7 +502,19 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
     return paired_dataset, pairs, doc_dict
 
 def pad_to_size(array, target_size):
-    padded_array = np.pad(array, (0, target_size - array.shape[0]), 'constant')
+    # padded_array = np.pad(array, (0, target_size - array.shape[0]), 'constant')
+    current_size = array.shape[0]  # 获取当前行列数（因为是方阵，行列数相等）
+
+    if target_size > current_size:
+        # 对行和列进行填充，使其变为目标大小的方阵
+        padded_array = np.pad(array, ((0, target_size - current_size), (0, target_size - current_size)), 'constant')
+    elif target_size < current_size:
+        # 对行和列进行截断
+        padded_array = array[:target_size, :target_size]
+    else:
+        # 如果target_size等于current_size，保持原样
+        padded_array = array
+
     return padded_array
 
 def collate_fn(batch):
