@@ -204,12 +204,12 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
         self.gcn_model = GCNModel(device, self.mention_model, opt=args).to(device)
         self.word_embedding_dim = self.mention_model.embeddings.word_embeddings.embedding_dim  # 1024
         self.mention_dim = self.word_embedding_dim * 2  # 2048
-        self.input_dim = int(self.mention_dim * 4)  # 8192
+        self.input_dim = int(self.mention_dim * 3 + 1024)  # 7168
         self.out_dim = 1
 
         self.dropout = nn.Dropout(p=0.5)
-        self.hidden_layer_0 = nn.Linear(self.input_dim, self.input_dim - 2048)  # (8192-->6144)
-        self.hidden_layer_1 = nn.Linear(self.input_dim - 2048, self.mention_dim)  # (6144-->2048)
+        self.hidden_layer_0 = nn.Linear(self.input_dim, self.input_dim - 1024)  # (7168-->6144)
+        self.hidden_layer_1 = nn.Linear(self.input_dim - 1024, self.mention_dim)  # (6144-->2048)
         self.hidden_layer_2 = nn.Linear(self.mention_dim, self.mention_dim)  # (2048-->2048)
         self.out_layer = nn.Linear(self.mention_dim, self.out_dim)  # (2048-->1)
 
@@ -303,8 +303,8 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
 
         # outputs1:(10,512)
         combined_rep = torch.cat(
-            [outputs1_1, outputs1_2, outputs2_1, outputs2_2, mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
-            dim=1)  # (10, 512*4+2048*3)
+            [outputs1_1, outputs2_1, mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
+            dim=1)  # (10, 512*2+2048*3)
         combined_rep = combined_rep
         zero_hidden = F.relu(self.hidden_layer_0(combined_rep))
         first_hidden = F.relu(self.hidden_layer_1(zero_hidden))
@@ -323,27 +323,27 @@ class CoreferenceCrossEncoder_DualGCN(nn.Module):
                     (predictions == labels).float() * (predictions == 1)) / (
                         torch.sum(predictions) + sys.float_info.epsilon)
 
-                TP = torch.sum((predictions == 1) & (labels == 1)).float()
-                FP = torch.sum((predictions == 1) & (labels == 0)).float()
-                FN = torch.sum((predictions == 0) & (labels == 1)).float()
-                precision1 = TP / (TP + FP + sys.float_info.epsilon)
-                recall = TP / (TP + FN + sys.float_info.epsilon)
-                f1_score = 2 * (precision1 * recall) / (precision1 + recall + sys.float_info.epsilon)
-
             else:
-                recall = 0.0
-                f1_score = 0.0
                 precision = torch.tensor(1.0).to(self.device)
 
-            penal1 = self.penal(adj_ag_1, adj1)
-            penal2 = self.penal(adj_ag_2, adj2)
+            TP = torch.sum((predictions == 1) & (labels == 1)).float()
+            FP = torch.sum((predictions == 1) & (labels == 0)).float()
+            FN = torch.sum((predictions == 0) & (labels == 1)).float()
+            precision1 = TP / (TP + FP + sys.float_info.epsilon)
+            recall = TP / (TP + FN + sys.float_info.epsilon)
+            f1_score = 2 * (precision1 * recall) / (precision1 + recall + sys.float_info.epsilon)
+
+            penal1 = self.penal(adj_ag_1, adj1).to(torch.float32)
+            penal2 = self.penal(adj_ag_2, adj2).to(torch.float32)
 
             output_dict["accuracy"] = acc
             output_dict["precision"] = precision
             output_dict["recall"] = recall
             output_dict["f1_score"] = f1_score
-            loss = loss_fct(out, labels) + self.args.penal_alpha*penal1 + self.args.penal_beta*penal2
+            loss = loss_fct(out, labels) + penal1 + penal2
+            loss1 = loss_fct(out, labels)
             output_dict["loss"] = loss
+            output_dict["loss1"] = loss1
 
 
         return output_dict

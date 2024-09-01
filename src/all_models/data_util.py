@@ -23,7 +23,7 @@ parser.add_argument('--config_path',
 
 parser.add_argument('--out_dir',
                     type=str,
-                    default='/home/yaolong/Rationale4CDECR-main/outputs/main/ecb/baseline/best_model',
+                    default='/home/yaolong/Rationale4CDECR-main/outputs/main/ecb/baseline/dual/dual_save_data/best_model',
                     help=' The directory to the output folder')
 
 parser.add_argument('--mode',
@@ -73,15 +73,17 @@ parser.add_argument('--attention_heads',
                     help='number of multi-attention heads')
 parser.add_argument('--losstype',
                     type=str,
-                    default='doubleloss',
+                    default='differentiatedloss',
                     help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
 parser.add_argument('--load_data', default=True, type=bool, help='load data')
+parser.add_argument('--save_data', default=False, type=bool, help='load data')
 parser.add_argument('--alpha', default=0.25, type=float)
+parser.add_argument('--use_cuda', default=True, type=bool, help='use gpu')
 parser.add_argument('--beta', default=0.25, type=float)
 parser.add_argument('--penal_alpha', default=0.25, type=float)
 parser.add_argument('--penal_beta', default=0.25, type=float)
-parser.add_argument('--diff_lr', default=True, action='store_true')
-parser.add_argument('--bert_lr', default=2e-5, type=float)
+parser.add_argument('--diff_lr', default=False, action='store_true')
+parser.add_argument('--bert_lr', default=1e-4, type=float) # 1e-4
 parser.add_argument('--learning_rate', default=0.002, type=float)
 parser.add_argument('--adj_pad_size', default=100, type=float, help="adj pad size")
 parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -229,7 +231,7 @@ def structure_data_for_train(df):  # 构建训练数据对
         all_embeddings_ment1 = []
         all_embeddings_ment2 = []
         ment_sentences = []
-        for ID in tqdm(all_data_index, desc='structure_train'):
+        for ID in tqdm(all_data_index[:50], desc='structure_train'):
             # get 'label'
             label = [float(df['label'][ID])]
             # get 'sentence'
@@ -308,18 +310,19 @@ def structure_data_for_train(df):  # 构建训练数据对
                                            torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2),
                                            torch.tensor(all_end_piece_2), torch.tensor(all_embeddings_ment1),
                                            torch.tensor(all_embeddings_ment2), torch.tensor(all_labels))
-        # 将数据打包进一个字典
-        data_dict = {
-            'all_syn_adj_ment1': all_syn_adj_ment1,
-            'all_syn_adj_ment2': all_syn_adj_ment2,
-            'data_set_in_tensor': data_set_in_tensor
-            }
+        if args.save_data:
+            # 将数据打包进一个字典
+            data_dict = {
+                'all_syn_adj_ment1': all_syn_adj_ment1,
+                'all_syn_adj_ment2': all_syn_adj_ment2,
+                'data_set_in_tensor': data_set_in_tensor
+                }
 
-        # 保存字典到 .pkl 文件
-        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/train_data.pkl'  # 文件路径
-        with open(file_path, 'wb') as f:
-            pickle.dump(data_dict, f)
-        print("数据已成功保存到文件。")
+            # 保存字典到 .pkl 文件
+            file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/1/train_data.pkl'  # 文件路径
+            with open(file_path, 'wb') as f:
+                pickle.dump(data_dict, f)
+            print("数据已成功保存到文件。")
 
     else:
         print('加载数据...')
@@ -435,13 +438,12 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         # even in ood test, dev and train set are from the same corpus.
         pairs = nn_generated_fixed_eval_pairs[train_set_name][eval_set]
     elif eval_set == 'test':
-        pairs = nn_generated_fixed_eval_pairs[test_set_name][
-            eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
+        pairs = nn_generated_fixed_eval_pairs[test_set_name][eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
     pairs = list(pairs)  # 将字典类型转换为列表类型
 
     if not args.load_data:
         id = 0
-        for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
+        for mention_1, mention_2 in tqdm(pairs[:50]):  # 从提及对数据列表中分别读取每一对mention
             record = structure_pair_dual(mention_1, mention_2,
                                          doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
             processed_dataset.append(record)
@@ -467,18 +469,19 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
                                        start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
 
-        # 将数据打包进一个字典
-        data_dict = {
-            'all_syn_adj_1': all_syn_adj_1,
-            'all_syn_adj_2': all_syn_adj_2,
-            'tensor_dataset_dev': tensor_dataset_dev
-            }
+        if args.save_data:
+            # 将数据打包进一个字典
+            data_dict = {
+                'all_syn_adj_1': all_syn_adj_1,
+                'all_syn_adj_2': all_syn_adj_2,
+                'tensor_dataset_dev': tensor_dataset_dev
+                }
 
-        # 保存字典到 .pkl 文件
-        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/dev_data.pkl'  # 文件路径
-        with open(file_path, 'wb') as f:
-            pickle.dump(data_dict, f)
-        print("数据已成功保存到文件。")
+            # 保存字典到 .pkl 文件
+            file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/test_data.pkl'  # 文件路径
+            with open(file_path, 'wb') as f:
+                pickle.dump(data_dict, f)
+            print("数据已成功保存到文件。")
 
     else:
         print('读取dev数据..')

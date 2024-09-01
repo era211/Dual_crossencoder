@@ -4,7 +4,7 @@
 '''
 import os
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 import random
 import logging
 import itertools
@@ -26,7 +26,6 @@ from transformers.optimization import get_linear_schedule_with_warmup
 
 #  Dynamically adding module search paths
 src_dir = "/home/yaolong/Rationale4CDECR-main/src"
-
 for pack in os.listdir(src_dir):
     full_path = os.path.join(src_dir, pack)
     if os.path.isdir(full_path):  # 仅在 pack 是目录时才添加到 sys.path
@@ -39,7 +38,7 @@ from bcubed_scorer import *
 from coarse import *
 from fine_v4 import *
 
-
+device = torch.device("cuda:0" if args.use_cuda else "cpu")
 # out_dir
 out_dir = args.out_dir
 if not os.path.exists(out_dir):
@@ -181,6 +180,22 @@ def find_cluster_key(node, clusters):
             return key
     return None
 
+def pad_to_size(array, target_size):
+    # padded_array = np.pad(array, (0, target_size - array.shape[0]), 'constant')
+    current_size = array.shape[0]  # 获取当前行列数（因为是方阵，行列数相等）
+
+    if target_size > current_size:
+        # 对行和列进行填充，使其变为目标大小的方阵
+        padded_array = np.pad(array, ((0, target_size - current_size), (0, target_size - current_size)), 'constant')
+    elif target_size < current_size:
+        # 对行和列进行截断
+        padded_array = array[:target_size, :target_size]
+    else:
+        # 如果target_size等于current_size，保持原样
+        padded_array = array
+
+    return padded_array
+
 
 def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
     if config_dict["oracle"]:
@@ -196,6 +211,7 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
         c_2 = random.sample(cluster_2, sample_size)
     else:
         c_2 = cluster_2
+    print('is_cluster_merge...')
     for mention_id_1 in c_1:
         records = []
         mention_1 = mentions[mention_id_1]
@@ -206,37 +222,45 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
             record = structure_pair_dual(mention_1, mention_2, doc_dict)
             records.append(record)
         sentences = torch.tensor([record["sentence"]
-                                  for record in records])
+                                  for record in records]).to(device)
         labels = torch.tensor([record["label"]
-                               for record in records])
+                               for record in records]).to(device)
         start_pieces_1 = torch.tensor(
-            [record["start_piece_1"] for record in records])
+            [record["start_piece_1"] for record in records]).to(device)
         end_pieces_1 = torch.tensor(
-            [record["end_piece_1"] for record in records])
+            [record["end_piece_1"] for record in records]).to(device)
         start_pieces_2 = torch.tensor(
-            [record["start_piece_2"] for record in records])
+            [record["start_piece_2"] for record in records]).to(device)
         end_pieces_2 = torch.tensor(
-            [record["end_piece_2"] for record in records])
+            [record["end_piece_2"] for record in records]).to(device)
         embeddings_dev_ment1 = torch.tensor(
-            [record["embeddings_dev_ment1"] for record in records])
+            [record["embeddings_dev_ment1"] for record in records]).to(device)
         embeddings_dev_ment2 = torch.tensor(
-            [record["embeddings_dev_ment2"] for record in records])
+            [record["embeddings_dev_ment2"] for record in records]).to(device)
         all_syn_adj_1 = [record["syn_adj_1"] for record in records]
         all_syn_adj_2 = [record["syn_adj_2"] for record in records]
-        tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
-                                           start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
 
-        # 创建 PairedDataset 实例
-        paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
-        dev_dataloader = DataLoader(paired_dataset,
-                                    sampler=SequentialSampler(paired_dataset),
-                                    batch_size=len(all_syn_adj_1),
-                                    collate_fn=collate_fn)
 
-        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = dev_dataloader
+        # tensor_dataset_dev = TensorDataset(sentences, start_pieces_1, end_pieces_1,
+        #                                    start_pieces_2, end_pieces_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
+        #
+        # # 创建 PairedDataset 实例
+        # paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
+        # dev_dataloader = DataLoader(paired_dataset,
+        #                             sampler=SequentialSampler(paired_dataset),
+        #                             batch_size=len(all_syn_adj_1),
+        #                             collate_fn=collate_fn)
+        #
+        # sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, all_embeddings_ment1, all_embeddings_ment2, labels, adj1, adj2 = dev_dataloader
+        target_size = args.adj_pad_size
+        padded_all_syn_adj_1 = [torch.tensor(pad_to_size(arr, target_size)).to(device) for arr in all_syn_adj_1]
+        padded_all_syn_adj_2 = [torch.tensor(pad_to_size(arr, target_size)).to(device) for arr in all_syn_adj_2]
+        padded_all_syn_adj_1 = torch.stack(padded_all_syn_adj_1)
+        padded_all_syn_adj_2 = torch.stack(padded_all_syn_adj_2)
+
         with torch.no_grad():
             out_dict = model(sentences, start_pieces_1, end_pieces_1,
-                                start_pieces_2, end_pieces_2, adj1, adj2, all_embeddings_ment1, all_embeddings_ment2, labels)
+                                start_pieces_2, end_pieces_2, padded_all_syn_adj_1, padded_all_syn_adj_2, embeddings_dev_ment1, embeddings_dev_ment2, labels)
             mean_prob = torch.mean(out_dict["probabilities"]).item()
             score += mean_prob
     print('判断是否将聚类合并完成：', (score / len(cluster_1)) >= 0.5)
@@ -248,7 +272,7 @@ def transitive_closure_merge(edges, mentions, model, doc_dict, graph,
     clusters = {}
     inv_clusters = {}
     mentions = {mention.mention_id: mention for mention in mentions}
-    for edge in tqdm(edges):  # prob大于0.5的两个提及的索引，标签和概率  [()]
+    for edge in tqdm(edges, desc='transitive_closure_merge'):  # prob大于0.5的两个提及的索引，标签和概率  [()]
         cluster_key = find_cluster_key(edge[0], clusters)
         alt_key = find_cluster_key(edge[1], clusters)
         if cluster_key == None and alt_key == None:
@@ -354,7 +378,7 @@ def evaluate(model, dev_dataloader, dev_pairs, doc_dict, epoch_num):
 
 # eval the coref-metric based on edges among clusters
 def eval_edges(edges, mentions, model, doc_dict, saved_edges):
-    print(len(mentions))
+    print('\n',len(mentions))
     global best_score, patience
     dot = Graph(comment='Cross Doc Co-ref')
     G = nx.Graph()
@@ -435,7 +459,6 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
 
 
 def train_model(df, dev_set):
-    device = torch.device("cuda:0" if args.use_cuda else "cpu")
     n_gpu = torch.cuda.device_count()
     logging.info("device: {} n_gpu: {}".format(device, n_gpu))
     print(f"Using device: {device}")
@@ -457,7 +480,7 @@ def train_model(df, dev_set):
     dev_event_pairs, dev_pairs, dev_docs = structure_dataset_for_eval(dev_set, eval_set='dev')
     print('开始训练...')
     if args.DualGCN:
-        optimizer = get_bert_optimizer(model_dual)
+        optimizer = get_optimizer(model_dual)
     else:
         optimizer = get_optimizer(model)
     scheduler = get_scheduler(optimizer, train_data_num)
@@ -494,12 +517,13 @@ def train_model(df, dev_set):
                 out_dict = model(sentences, start_pieces_1, end_pieces_1,
                                  start_pieces_2, end_pieces_2, labels)
             loss = out_dict["loss"]
+            loss1 = out_dict["loss1"]
             precision = out_dict["precision"]
             accuracy = out_dict["accuracy"]
             recall = out_dict["recall"]
             f1 = out_dict["f1_score"]
             loss.backward()
-            tr_loss += loss.item()
+            tr_loss += loss1.item()
             tr_p += precision.item()
             tr_a += accuracy.item()
             tr_r += recall
@@ -546,7 +570,7 @@ def main():
         print(topic_sizes)
         print(sum(topic_sizes))
         print(sum([size * size for size in topic_sizes]))
-        device = torch.device("cuda:5" if args.use_cuda else "cpu")
+        device = torch.device("cuda:0" if args.use_cuda else "cpu")
         event_encoder_path = config_dict['event_encoder_model']
         with open(event_encoder_path, 'rb') as f:
             params = torch.load(f, map_location=device)
@@ -571,7 +595,8 @@ def main():
                                                                              eval_set='test')  # test_event_pairs是编码后的上下文token数字序列以及标签，两个mention的起始和结束索引，test_pairs是mention对，test_docs是文档字典
         test_dataloader = DataLoader(test_event_pairs,
                                      sampler=SequentialSampler(test_event_pairs),  # 顺序采样
-                                     batch_size=config_dict["batch_size"])
+                                     batch_size=config_dict["batch_size"],
+                                     collate_fn=collate_fn)
         evaluate(model, test_dataloader, test_pairs, test_docs, 0)
 
 
