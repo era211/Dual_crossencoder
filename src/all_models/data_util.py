@@ -75,11 +75,11 @@ parser.add_argument('--losstype',
                     type=str,
                     default='differentiatedloss',
                     help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
-parser.add_argument('--load_data', default=True, type=bool, help='load data')
-parser.add_argument('--save_data', default=False, type=bool, help='load data')
-parser.add_argument('--alpha', default=0.25, type=float)
+parser.add_argument('--load_data', default=False, type=bool, help='load data')
+parser.add_argument('--save_data', default=False, type=bool, help='save data')
+parser.add_argument('--alpha', default=0.4, type=float)
 parser.add_argument('--use_cuda', default=True, type=bool, help='use gpu')
-parser.add_argument('--beta', default=0.25, type=float)
+parser.add_argument('--beta', default=0.3, type=float)
 parser.add_argument('--penal_alpha', default=0.25, type=float)
 parser.add_argument('--penal_beta', default=0.25, type=float)
 parser.add_argument('--diff_lr', default=False, action='store_true')
@@ -443,7 +443,7 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
 
     if not args.load_data:
         id = 0
-        for mention_1, mention_2 in tqdm(pairs[:50]):  # 从提及对数据列表中分别读取每一对mention
+        for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
             record = structure_pair_dual(mention_1, mention_2,
                                          doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
             processed_dataset.append(record)
