@@ -82,16 +82,17 @@ def tokenize_and_map_pair(sentences_1, sentences_2, mention_sentence_1,
         else:
             mapping[counter].append(i)
             continue
-    return embeddings, mapping, mention_offset_1, mention_offset_2, mention_sent_1, mention_sent_2    # 表示原始句子中每个单词的索引与编码成token后该单词对应的各个token的索引之间的映射关系
+    return embeddings, mapping, mention_offset_1, mention_offset_2    # 表示原始句子中每个单词的索引与编码成token后该单词对应的各个token的索引之间的映射关系
 
 
 class CoreferenceCrossEncoder(nn.Module):
-    def __init__(self, device):
+    def __init__(self, device, args):
         super(CoreferenceCrossEncoder, self).__init__()
         self.device = device
+        self.args = args
         self.pos_weight = torch.tensor([0.1]).to(device)
         self.model_type = 'CoreferenceCrossEncoder'
-        self.mention_model = RobertaModel.from_pretrained('/home/yaolong/PT_MODELS/PT_MODELS/roberta-large',
+        self.mention_model = RobertaModel.from_pretrained('/root/autodl-tmp/PLM/roberta-large',
                                                           return_dict=True)
         self.word_embedding_dim = self.mention_model.embeddings.word_embeddings.embedding_dim  # 1024
         self.mention_dim = self.word_embedding_dim * 2  # 2048
@@ -139,7 +140,34 @@ class CoreferenceCrossEncoder(nn.Module):
             "attention_mask": mask
         }
 
+    def out(self, combined_rep):
+        first_hidden = F.relu(self.hidden_layer_1(combined_rep))
+        second_hidden = F.relu(self.hidden_layer_2(first_hidden))
+        out = self.out_layer(second_hidden)
+        return out
+
+    def acc_precision(self, predictions, labels):
+        correct = torch.sum(predictions == labels)
+        total = float(predictions.shape[0])
+        acc = correct / total
+        # True Positives (TP): 模型预测为1且标签为1的样本
+        true_positives = torch.sum((predictions == 1) & (labels == 1)).float()
+
+        # False Positives (FP): 模型预测为1但标签为0的样本
+        false_positives = torch.sum((predictions == 1) & (labels == 0)).float()
+        if torch.sum(predictions).item() != 0:
+            # precision = torch.sum(
+            #     (predictions == labels).float() * predictions == 1) / (
+            #         torch.sum(predictions) + sys.float_info.epsilon)
+            # Precision (精确率): True Positives / (True Positives + False Positives)
+            precision = true_positives / (true_positives + false_positives + sys.float_info.epsilon)
+        else:
+            precision = torch.tensor(1.0).to(self.device)
+        return precision, acc
+
     def forward(self,
+                c_sentences,
+                e_sentences,
                 sentences,
                 start_pieces_1,
                 end_pieces_1,
@@ -147,35 +175,63 @@ class CoreferenceCrossEncoder(nn.Module):
                 end_pieces_2,
                 labels=None):
         transformer_output = self.get_sentence_vecs(sentences)  # 得到最后一层表示，（10，512，1024）
+        c_transformer_output = self.get_sentence_vecs(c_sentences)  # 得到最后一层表示，（10，512，1024）
+        e_transformer_output = self.get_sentence_vecs(e_sentences)  # 得到最后一层表示，（10，512，1024）
         mention_reps_1 = self.get_mention_rep(transformer_output,
                                               start_pieces_1, end_pieces_1)
         mention_reps_2 = self.get_mention_rep(transformer_output,
                                               start_pieces_2, end_pieces_2)  # (10,1024*2)
+
+        c_mention_reps_1 = self.get_mention_rep(c_transformer_output,
+                                              start_pieces_1, end_pieces_1)
+        c_mention_reps_2 = self.get_mention_rep(c_transformer_output,
+                                              start_pieces_2, end_pieces_2)  # (10,1024*2)
+
+
+        e_mention_reps_1 = self.get_mention_rep(e_transformer_output,
+                                              start_pieces_1, end_pieces_1)
+        e_mention_reps_2 = self.get_mention_rep(e_transformer_output,
+                                              start_pieces_2, end_pieces_2)  # (10,1024*2)
+
         combined_rep = torch.cat(
             [mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
             dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)
+
+        c_combined_rep = torch.cat(
+            [c_mention_reps_1, c_mention_reps_2, c_mention_reps_1 * c_mention_reps_2],
+            dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)
+
+        e_combined_rep = torch.cat(
+            [e_mention_reps_1, e_mention_reps_2, e_mention_reps_1 * e_mention_reps_2],
+            dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)
+
         combined_rep = combined_rep
-        first_hidden = F.relu(self.hidden_layer_1(combined_rep))
-        second_hidden = F.relu(self.hidden_layer_2(first_hidden))
-        out = self.out_layer(second_hidden)
-        probs = F.sigmoid(out)
-        predictions = torch.where(probs > 0.5, 1.0, 0.0)
-        output_dict = {"probabilities": probs, "predictions": predictions}
+        # first_hidden = F.relu(self.hidden_layer_1(combined_rep))
+        # second_hidden = F.relu(self.hidden_layer_2(first_hidden))
+        # out = self.out_layer(second_hidden)
+        f_out = self.out(combined_rep)
+        c_out = self.out(c_combined_rep)
+        e_out = self.out(e_combined_rep)
+        cf_out = f_out - self.args.alpha*c_out - self.args.beta*e_out
+        f_probs = torch.sigmoid(f_out)
+        cf_probs = torch.sigmoid(cf_out)
+        predictions = torch.where(f_probs > 0.5, 1.0, 0.0)
+        cf_predictions = torch.where(cf_probs > 0.5, 1.0, 0.0)
+        output_dict = {"probabilities": f_probs, "predictions": predictions, "cf_probabilities": f_probs, "cf_predictions": cf_predictions}
         if labels is not None:
             loss_fct = nn.BCEWithLogitsLoss()
-            correct = torch.sum(predictions == labels)
-            total = float(predictions.shape[0])
-            acc = correct / total
-            if torch.sum(predictions).item() != 0:
-                precision = torch.sum(
-                    (predictions == labels).float() * predictions == 1) / (
-                        torch.sum(predictions) + sys.float_info.epsilon)
-            else:
-                precision = torch.tensor(1.0).to(self.device)
+            precision, acc = self.acc_precision(predictions, labels)
+            cf_precision, cf_acc = self.acc_precision(cf_predictions, labels)
             output_dict["accuracy"] = acc
             output_dict["precision"] = precision
-            loss = loss_fct(out, labels)
+            output_dict["cf_accuracy"] = cf_acc
+            output_dict["cf_precision"] = cf_precision
+            f_loss = loss_fct(f_out, labels)
+            c_loss = loss_fct(c_out, labels)
+            e_loss = loss_fct(e_out, labels)
+            loss = f_loss + self.args.alpha*c_loss + self.args.beta*e_loss
             output_dict["loss"] = loss
+            output_dict["o_loss"] = f_loss
         return output_dict
 
 

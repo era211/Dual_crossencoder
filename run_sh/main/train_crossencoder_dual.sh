@@ -20,4 +20,4 @@ fi
 echo "Train dual_crossencoder"
 
 nohup python -u src/all_models/DualGCN_crossencoder_v4.py --config_path ${config_path} --out_dir ${out_dir}\
-    --mode train --load_data ${load_data} --save_data ${save_data} --losstype ${losstype} --alpha 0.4 --beta 0.3 --random_seed ${random_seed} --gpu_num ${gpu_num} >${out_dir}/dual_crossencoder_v4_savedata.log 2>${out_dir}/dual_crossencoder_v4_savedata.progress &
+    --mode train --load_data True --save_data ${save_data} --losstype differentiatedloss --alpha 0.4 --beta 0.3 --random_seed ${random_seed} --gpu_num ${gpu_num} >${out_dir}/dual_crossencoder_v4_savedata.log 2>${out_dir}/dual_crossencoder_v4_savedata.progress &

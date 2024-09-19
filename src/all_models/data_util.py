@@ -28,7 +28,7 @@ parser.add_argument('--out_dir',
 
 parser.add_argument('--mode',
                     type=str,
-                    default='train',
+                    default='eval',
                     help='train or eval')
 
 # parser.add_argument('--eval',
@@ -76,6 +76,7 @@ parser.add_argument('--losstype',
                     default='differentiatedloss',
                     help="['doubleloss', 'orthogonalloss', 'differentiatedloss']")
 parser.add_argument('--load_data', default=False, type=bool, help='load data')
+parser.add_argument('--load_test_data', default=True, type=bool, help='load test data')
 parser.add_argument('--save_data', default=False, type=bool, help='save data')
 parser.add_argument('--alpha', default=0.4, type=float)
 parser.add_argument('--use_cuda', default=True, type=bool, help='use gpu')
@@ -441,7 +442,22 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         pairs = nn_generated_fixed_eval_pairs[test_set_name][eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
     pairs = list(pairs)  # 将字典类型转换为列表类型
 
-    if not args.load_data:
+    if args.load_test_data:
+        print('读取test数据..')
+        # 指定文件路径
+        file_path = '/home/yaolong/Rationale4CDECR-main/data_preparation/test_data.pkl'
+
+        # 打开文件并加载数据
+        with open(file_path, 'rb') as f:
+            data_dict = pickle.load(f)
+
+        # 现在可以从字典中获取各个数据
+        all_syn_adj_1 = data_dict['all_syn_adj_1']
+        all_syn_adj_2 = data_dict['all_syn_adj_2']
+        tensor_dataset_dev = data_dict['tensor_dataset_dev']
+
+        print("test数据已成功从文件中读取...")
+    elif not args.load_data:
         id = 0
         for mention_1, mention_2 in tqdm(pairs):  # 从提及对数据列表中分别读取每一对mention
             record = structure_pair_dual(mention_1, mention_2,
@@ -482,7 +498,6 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
             with open(file_path, 'wb') as f:
                 pickle.dump(data_dict, f)
             print("数据已成功保存到文件。")
-
     else:
         print('读取dev数据..')
         # 指定文件路径
@@ -497,11 +512,11 @@ def structure_dataset_for_eval(data_set, eval_set='dev'):
         all_syn_adj_2 = data_dict['all_syn_adj_2']
         tensor_dataset_dev = data_dict['tensor_dataset_dev']
 
-        print("数据已成功从文件中读取...")
+        print("dev数据已成功从文件中读取...")
 
     # 创建 PairedDataset 实例
     paired_dataset = PairedDataset(tensor_dataset_dev, all_syn_adj_1, all_syn_adj_2)
-    print('验证集数据构造完成...')
+    print('dev/test数据构造完成...')
     return paired_dataset, pairs, doc_dict
 
 def pad_to_size(array, target_size):

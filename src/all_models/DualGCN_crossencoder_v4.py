@@ -4,7 +4,7 @@
 '''
 import os
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import random
 import logging
 import itertools

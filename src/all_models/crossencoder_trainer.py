@@ -118,7 +118,7 @@ else:
 best_score = None 
 patience = 0      # for early stopping
 comparison_set = set()
-tokenizer = RobertaTokenizer.from_pretrained("/home/yaolong/PT_MODELS/PT_MODELS/roberta-base") # tokenizer
+tokenizer = RobertaTokenizer.from_pretrained("/home/share/models/PT_MODELS/roberta-base") # tokenizer
 # 这个tokenizer在哪里使用了：构建训练句子对的时候，对句子对进行token化
 # use train/dev data in 'train' mode, and use test data in 'eval' mode
 print('Loading fixed dev set')
