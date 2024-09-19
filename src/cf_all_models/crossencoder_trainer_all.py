@@ -29,7 +29,9 @@ from transformers.optimization import get_linear_schedule_with_warmup
 for pack in os.listdir("/root/autodl-tmp/Rationale4CDECR-main/src"):
     sys.path.append(os.path.join("src", pack))
 sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/src/shared/")
+sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/conll_eval/")
 from classes import *  # make sure classes in "/src/shared/" can be imported.
+from eval import result
 from bcubed_scorer import *
 from coarse import *
 from fine_all import *
@@ -778,7 +780,6 @@ def test_model(model, last_epoch=True):
                                      batch_size=config_dict["batch_size"])
         evaluate(model, event_encoder, test_dataloader, test_pairs, test_docs, 0)
 
-        from conll_eval.eval import result
         result()
         args.test = False
         args.mode = 'train'

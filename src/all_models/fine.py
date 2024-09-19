@@ -91,7 +91,7 @@ class CoreferenceCrossEncoder(nn.Module):
         self.device = device
         self.pos_weight = torch.tensor([0.1]).to(device)
         self.model_type = 'CoreferenceCrossEncoder'
-        self.mention_model = RobertaModel.from_pretrained('/home/yaolong/PT_MODELS/PT_MODELS/roberta-large',
+        self.mention_model = RobertaModel.from_pretrained('/root/autodl-tmp/PLM/roberta-large',
                                                           return_dict=True)
         self.word_embedding_dim = self.mention_model.embeddings.word_embeddings.embedding_dim  # 1024
         self.mention_dim = self.word_embedding_dim * 2  # 2048

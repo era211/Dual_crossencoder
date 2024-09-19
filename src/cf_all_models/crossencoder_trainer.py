@@ -47,12 +47,12 @@ parser.add_argument('--out_dir',
 
 parser.add_argument('--out_dir_test',
                     type=str,
-                    default='/root/autodl-tmp/Rationale4CDECR-main/outputs/main/ecb/cf/baseline/eval_results',
+                    default='/root/autodl-tmp/Rationale4CDECR-main/outputs/main/ecb/cf/bs10_alp_beta015/baseline/eval_results',
                     help=' The directory to the output folder')
 
 parser.add_argument('--mode',
                     type=str,
-                    default='train',
+                    default='eval',
                     help='train or eval')
 
 
@@ -277,16 +277,24 @@ def structure_dataset_for_eval(data_set,
                 pickle.dump(data_dict, f)
             print("数据已成功保存到文件。")
     else:
-        print('加载dev数据...')
-        # 指定文件路径
-        file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/dev_data.pkl'
+        if eval_set == 'dev':
+            print('加载dev数据...')
+            # 指定文件路径
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/dev_data.pkl'
+        elif eval_set == 'test':
+            print('加载test数据...')
+            # 指定文件路径
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/test_data.pkl'
 
         # 打开文件并加载数据
         with open(file_path, 'rb') as f:
             data_dict = pickle.load(f)
 
         # 现在可以从字典中获取各个数据
-        tensor_dataset = data_dict['dev_tensor_dataset']
+        if eval_set == 'dev':
+            tensor_dataset = data_dict['dev_tensor_dataset']
+        elif eval_set == 'test':
+            tensor_dataset = data_dict['tensor_dataset']
         pairs = data_dict['pairs']
         doc_dict = data_dict['doc_dict']
 
@@ -804,7 +812,7 @@ def main():
         print(topic_sizes)
         print(sum(topic_sizes))
         print(sum([size * size for size in topic_sizes]))
-        device = torch.device("cuda:1" if args.use_cuda else "cpu")
+        device = torch.device("cuda:0" if args.use_cuda else "cpu")
         event_encoder_path=config_dict['event_encoder_model']
         with open(event_encoder_path, 'rb') as f:
             params = torch.load(f, map_location=device)

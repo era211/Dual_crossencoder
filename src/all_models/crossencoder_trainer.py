@@ -25,10 +25,10 @@ import torch.optim as optim
 from transformers import RobertaTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
 #  Dynamically adding module search paths
-for pack in os.listdir("/home/yaolong/Rationale4CDECR-main/src"):
+for pack in os.listdir("/root/autodl-tmp/Rationale4CDECR-main/src"):
     sys.path.append(os.path.join("src", pack))
-sys.path.append("/home/yaolong/Rationale4CDECR-main/src/shared/")
-sys.path.append("/home/yaolong/Rationale4CDECR-main/src/LAL_Parser/src_joint/")
+sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/src/shared/")
+sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/src/LAL_Parser/src_joint/")
 from classes import * # make sure classes in "/src/shared/" can be imported.
 from bcubed_scorer import *
 from coarse import *
@@ -38,12 +38,12 @@ from fine import *
 parser = argparse.ArgumentParser(description='Training a cross-encoder')
 parser.add_argument('--config_path',
                     type=str,
-                    default='/home/yaolong/Rationale4CDECR-main/configs/main/ecb/baseline.json',
+                    default='/root/autodl-tmp/Rationale4CDECR-main/configs/main/ecb/baseline.json',
                     help=' The path configuration json file')
 
 parser.add_argument('--out_dir',
                     type=str,
-                    default='/home/yaolong/Rationale4CDECR-main/outputs/main/ecb/baseline/best_model',
+                    default='/root/autodl-tmp/Rationale4CDECR-main/outputs/main/ecb/baseline/best_model',
                     help=' The directory to the output folder')
 
 parser.add_argument('--mode',
@@ -67,7 +67,9 @@ parser.add_argument('--gpu_num',
                     default=1,
                     help=' A single GPU number')
 
-
+parser.add_argument('--load_data', default=True, type=bool, help='load data')
+parser.add_argument('--load_test_data', default=True, type=bool, help='load test data')
+parser.add_argument('--save_data', default=False, type=bool, help='save data')
 # load all config parameters for training 
 args = parser.parse_args()
 assert args.mode in ['train', 'eval'], "mode must be train or eval!"
@@ -118,19 +120,19 @@ else:
 best_score = None 
 patience = 0      # for early stopping
 comparison_set = set()
-tokenizer = RobertaTokenizer.from_pretrained("/home/share/models/PT_MODELS/roberta-base") # tokenizer
+tokenizer = RobertaTokenizer.from_pretrained("/root/autodl-tmp/PLM/roberta-base") # tokenizer
 # 这个tokenizer在哪里使用了：构建训练句子对的时候，对句子对进行token化
 # use train/dev data in 'train' mode, and use test data in 'eval' mode
 print('Loading fixed dev set')
 # 这些数据对的产生过程
-ecb_dev_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/dev/dev_pairs')
-fcc_dev_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/dev/dev_pairs')
-gvc_dev_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/dev/dev_pairs')
+ecb_dev_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/ecb/dev/dev_pairs')
+fcc_dev_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/fcc/dev/dev_pairs')
+gvc_dev_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/gvc/dev/dev_pairs')
 
 print('Loading fixed test set')
-ecb_test_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/ecb/test/test_pairs')
-fcc_test_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/fcc/test/test_pairs')
-gvc_test_set=pd.read_pickle('/home/yaolong/Rationale4CDECR-main/retrieved_data/main/gvc/test/test_pairs')
+ecb_test_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/ecb/test/test_pairs')
+fcc_test_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/fcc/test/test_pairs')
+gvc_test_set=pd.read_pickle('/root/autodl-tmp/Rationale4CDECR-main/retrieved_data/main/gvc/test/test_pairs')
 print('successful loading fixed dev & test sets')
 
 nn_generated_fixed_eval_pairs={
@@ -219,7 +221,7 @@ def structure_pair(mention_1,
     return record
 
 
-def structure_dataset_for_eval(data_set,
+def structure_dataset_for_eval1(data_set,
                                eval_set = 'dev'):
     assert eval_set in ['dev','test'], "please check the eval_set!"
     processed_dataset = []
@@ -255,7 +257,173 @@ def structure_dataset_for_eval(data_set,
                         start_pieces_2, end_pieces_2, labels)
     return tensor_dataset, pairs, doc_dict
 
+
+def structure_dataset_for_eval(data_set,
+                               eval_set='dev'):
+    if not args.load_data:
+        assert eval_set in ['dev', 'test'], "please check the eval_set!"
+        processed_dataset = []
+        doc_dict = {
+            key: document
+            for topic in data_set.topics.values()
+            for key, document in topic.docs.items()
+        }  # data_set用来构建原始数据集中所有主题的文档字典
+        train_set_name = config_dict["training_dataset"]
+        test_set_name = config_dict["test_dataset"]
+        if eval_set == 'dev':
+            # even in ood test, dev and train set are from the same corpus.
+            pairs = nn_generated_fixed_eval_pairs[train_set_name][eval_set]
+        elif eval_set == 'test':
+            pairs = nn_generated_fixed_eval_pairs[test_set_name][
+                eval_set]  # 字典类型 /retrieved_data/main/ecb/test/test_pairs'  这个数据集中保存的都是mention对
+        pairs = list(pairs)  # 将字典类型转换为列表类型
+        for mention_1, mention_2 in pairs:  # 从提及对数据列表中分别读取每一对mention
+            record = structure_pair(mention_1, mention_2,
+                                    doc_dict)  # 得到两个mention的上下文句子的token序列，标签值，mention分别在它们对应句子的token序列中的起始和结束位置
+            processed_dataset.append(record)
+        sentences = torch.tensor(
+            [record["sentence"] for record in processed_dataset])
+        labels = torch.tensor([record["label"] for record in processed_dataset])
+        start_pieces_1 = torch.tensor(
+            [record["start_piece_1"] for record in processed_dataset])
+        end_pieces_1 = torch.tensor(
+            [record["end_piece_1"] for record in processed_dataset])
+        start_pieces_2 = torch.tensor(
+            [record["start_piece_2"] for record in processed_dataset])
+        end_pieces_2 = torch.tensor(
+            [record["end_piece_2"] for record in processed_dataset])
+        print(labels.sum() / float(labels.shape[0]))
+        tensor_dataset = TensorDataset(sentences, start_pieces_1, end_pieces_1, \
+                                       start_pieces_2, end_pieces_2, labels)
+
+        if args.save_data:
+            # 将数据打包进一个字典
+            data_dict = {
+                'tensor_dataset': tensor_dataset,
+                'pairs': pairs,
+                'doc_dict': doc_dict
+            }
+
+            # 保存字典到 .pkl 文件
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/dev_data.pkl'  # 文件路径
+            with open(file_path, 'wb') as f:
+                pickle.dump(data_dict, f)
+            print("数据已成功保存到文件。")
+    else:
+        if eval_set == 'dev':
+            print('加载dev数据...')
+            # 指定文件路径
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/dev_data.pkl'
+        elif eval_set == 'test':
+            print('加载test数据...')
+            # 指定文件路径
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/test_data.pkl'
+
+        # 打开文件并加载数据
+        with open(file_path, 'rb') as f:
+            data_dict = pickle.load(f)
+
+        # 现在可以从字典中获取各个数据
+        if eval_set == 'dev':
+            tensor_dataset = data_dict['dev_tensor_dataset']
+        elif eval_set == 'test':
+            tensor_dataset = data_dict['tensor_dataset']
+        pairs = data_dict['pairs']
+        doc_dict = data_dict['doc_dict']
+
+        print("数据已成功从文件中读取...")
+    return tensor_dataset, pairs, doc_dict
+
 def structure_data_for_train(df):  # 构建训练数据对
+    if not args.load_data:
+        max_seq_length = 512
+        all_data_index = df.index
+        all_labels, all_sentences = [], []
+        all_start_piece_1, all_end_piece_1 = [], []
+        all_start_piece_2, all_end_piece_2 = [], []
+        for ID in all_data_index:  # 处理每一行数据
+            # get 'label'
+            label = [float(df['label'][ID])]
+            # get 'sentence'
+            sentences_text_1 = df['text_1'][ID]
+            sentences_text_2 = df['text_2'][ID]
+            text_1_length = len(sentences_text_1.split(' '))
+            embeddings = tokenizer(sentences_text_1,
+                                   sentences_text_2,
+                                   max_length=max_seq_length,
+                                   truncation=True,
+                                   padding="max_length")["input_ids"]
+            # get start/end_piece_1/2
+            counter = 0
+            new_tokens = tokenizer.convert_ids_to_tokens(embeddings)  # 将编码数字转换为对应的token
+            total_tokens_num = df['total_tokens_num'][ID]
+            token_map = dict(list(map(lambda x: (x, []), np.arange(
+                total_tokens_num))))  # 以第一句为例，句子1和句子2的总长度为173，tokenizer后得到新的token，包括原本词和子词，所以这里将新产生的token分别与原来的173个词对应起来
+            for i, token in enumerate(new_tokens):
+                if ((i + 1) < len(new_tokens) - 1) and (new_tokens[i] == "</s>") and (new_tokens[i + 1] == "</s>"):
+                    counter = text_1_length - 1
+                else:
+                    pass
+                if token == "<s>" or token == "</s>" or token == "<pad>":
+                    continue
+                elif token[0] == "Ġ" or new_tokens[i - 1] == "</s>":
+                    counter += 1
+                    token_map[counter].append(i)
+                else:
+                    token_map[counter].append(i)
+                    continue
+            trigger_1_abs_start = df['trigger_1_abs_start'][ID]
+            trigger_1_abs_end = df['trigger_1_abs_end'][ID]
+            trigger_2_abs_start = df['trigger_2_abs_start'][ID]
+            trigger_2_abs_end = df['trigger_2_abs_end'][ID]
+            ##get start/end_piece_1
+            start_piece_1 = token_map[trigger_1_abs_start][0]  # 得到新token后的触发词的索引
+            if trigger_1_abs_end in token_map:
+                end_piece_1 = token_map[trigger_1_abs_end][-1]
+            else:
+                end_piece_1 = token_map[trigger_1_abs_start][-1]
+            start_piece_2 = token_map[trigger_2_abs_start][0]
+            if trigger_2_abs_end in token_map:
+                end_piece_2 = token_map[trigger_2_abs_end][-1]
+            else:
+                end_piece_2 = token_map[trigger_2_abs_start][-1]
+            all_sentences.append(embeddings)
+            all_start_piece_1.append([start_piece_1])
+            all_end_piece_1.append([end_piece_1])
+            all_start_piece_2.append([start_piece_2])
+            all_end_piece_2.append([end_piece_2])
+            all_labels.append(label)
+        data_set_in_tensor = TensorDataset(torch.tensor(all_sentences), torch.tensor(all_start_piece_1), \
+                                           torch.tensor(all_end_piece_1), torch.tensor(all_start_piece_2), \
+                                           torch.tensor(all_end_piece_2), torch.tensor(all_labels))
+
+        if args.save_data:
+            # 将数据打包进一个字典
+            data_dict = {
+                'data_set_in_tensor': data_set_in_tensor
+            }
+
+            # 保存字典到 .pkl 文件
+            file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/train_data.pkl'  # 文件路径
+            with open(file_path, 'wb') as f:
+                pickle.dump(data_dict, f)
+            print("数据已成功保存到文件。")
+    else:
+        print('加载数据...')
+        # 指定文件路径
+        file_path = '/root/autodl-tmp/Rationale4CDECR-main/data_preparation/cf/train_data.pkl'
+
+        # 打开文件并加载数据
+        with open(file_path, 'rb') as f:
+            data_dict = pickle.load(f)
+
+        # 现在可以从字典中获取各个数据
+        data_set_in_tensor = data_dict['data_set_in_tensor']
+
+        print("数据已成功从文件中读取...")
+    return data_set_in_tensor
+
+def structure_data_for_train1(df):  # 构建训练数据对
     max_seq_length = 512
     all_data_index=df.index
     all_labels, all_sentences=[], []
@@ -384,8 +552,7 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
         records = []
         mention_1 = mentions[mention_id_1]
         for mention_id_2 in c_2:
-            comparison_set = comparison_set | set(
-                [frozenset([mention_id_1, mention_id_2])])
+            comparison_set = comparison_set | {frozenset([mention_id_1, mention_id_2])}
             mention_2 = mentions[mention_id_2]
             record = structure_pair(mention_1, mention_2, doc_dict)
             records.append(record)
@@ -494,8 +661,7 @@ def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
             prediction = predictions[p_index]
             mentions.add(pair_0)
             mentions.add(pair_1)
-            comparison_set = comparison_set | set(
-                [frozenset([pair_0.mention_id, pair_1.mention_id])])
+            comparison_set = comparison_set | {frozenset([pair_0.mention_id, pair_1.mention_id])}
             if probs[p_index][0] > 0.5:
                 if pair_0.mention_id not in best_edges or (
                         probs[p_index][0] > best_edges[pair_0.mention_id][3]):
@@ -564,9 +730,9 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
     else:
         pass
     # deprecated 
-    # pn, pd = b_cubed(model_clusters, gold_map)
-    # rn, rd = b_cubed(gold_clusters, model_map)
-    # tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
+    pn, pd = b_cubed(model_clusters, gold_map)
+    rn, rd = b_cubed(gold_clusters, model_map)
+    tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
     p, r, f1 = bcubed(gold_sets, model_sets)
     tqdm.write("Recall: {:.6f} Precision: {:.6f} F1: {:.6f}".format(p, r, f1))
     if best_score == None or f1 > best_score:
@@ -595,7 +761,7 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
 
 
 def train_model(df,dev_set):
-    device = torch.device("cuda:1" if args.use_cuda else "cpu")
+    device = torch.device("cuda:0" if args.use_cuda else "cpu")
     n_gpu = torch.cuda.device_count()
     logging.info("device: {} n_gpu: {}".format(device, n_gpu))
     print(f"Using device: {device}")
