@@ -15,7 +15,7 @@ from typing import Iterator, Iterable, List, Union
 
 for pack in os.listdir("src"):
     sys.path.append(os.path.join("src", pack))
-from classes import *
+from ..shared.classes import *
 
 tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 def dataset_to_docs(dataset):

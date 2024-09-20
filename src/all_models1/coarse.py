@@ -42,7 +42,7 @@ class EncoderCosineRanker(nn.Module):
         super(EncoderCosineRanker, self).__init__()
         self.device = device
         self.model_type = 'EncoderCosineRanker'
-        self.mention_model = RobertaModel.from_pretrained('./models/roberta-large',
+        self.mention_model = RobertaModel.from_pretrained('/root/autodl-tmp/PLM/roberta-large',
                                                           return_dict=True)
         self.cluster_lookup = {}
         self.faiss_index = {}

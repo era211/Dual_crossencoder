@@ -20,7 +20,7 @@ import networkx as nx
 # Record training process
 import torch
 from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
-# from torch.utils.tensorboard import SummaryWriter  
+# from torch.utils.tensorboard import SummaryWriter
 import torch.optim as optim
 from transformers import RobertaTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
@@ -32,8 +32,7 @@ sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/src/shared/")
 from classes import *  # make sure classes in "/src/shared/" can be imported.
 from bcubed_scorer import *
 from coarse import *
-from fine import *
-from data_util import *
+from data_util_cf import *
 
 
 def get_optimizer(model):
@@ -108,19 +107,31 @@ def is_cluster_merge(cluster_1, cluster_2, mentions, model, doc_dict):
             record = structure_pair(mention_1, mention_2, doc_dict)
             records.append(record)
         sentences = torch.tensor([record["sentence"]
-                                  for record in records]).to(model.device)
+                                  for record in records])
         labels = torch.tensor([record["label"]
-                               for record in records]).to(model.device)
+                               for record in records])
         start_pieces_1 = torch.tensor(
-            [record["start_piece_1"] for record in records]).to(model.device)
+            [record["start_piece_1"] for record in records])
         end_pieces_1 = torch.tensor(
-            [record["end_piece_1"] for record in records]).to(model.device)
+            [record["end_piece_1"] for record in records])
         start_pieces_2 = torch.tensor(
-            [record["start_piece_2"] for record in records]).to(model.device)
+            [record["start_piece_2"] for record in records])
         end_pieces_2 = torch.tensor(
-            [record["end_piece_2"] for record in records]).to(model.device)
+            [record["end_piece_2"] for record in records])
+        # 将这些数据组合成一个 batch（注意使用 zip 打包）
+        batch = list(zip(sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels))
+        c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels = collate_fn(batch)
+        # 将数据移动到 GPU 上
+        c_sentences = c_sentences.to(model.device)
+        e_sentences = e_sentences.to(model.device)
+        sentences = sentences.to(model.device)
+        start_pieces_1 = start_pieces_1.to(model.device)
+        end_pieces_1 = end_pieces_1.to(model.device)
+        start_pieces_2 = start_pieces_2.to(model.device)
+        end_pieces_2 = end_pieces_2.to(model.device)
+        labels = labels.to(model.device)
         with torch.no_grad():
-            out_dict = model(sentences, start_pieces_1, end_pieces_1,
+            out_dict = model(c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1,
                              start_pieces_2, end_pieces_2, labels)
             mean_prob = torch.mean(out_dict["probabilities"]).item()
             score += mean_prob
@@ -194,10 +205,10 @@ def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
     all_probs = []
     for step, batch in enumerate(tqdm(dev_dataloader, desc="Test Batch")):
         batch = tuple(t.to(model.device) for t in batch)
-        sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels = batch
+        c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels = batch
         if not config_dict["oracle"]:
             with torch.no_grad():
-                out_dict = model(sentences, start_pieces_1, end_pieces_1,
+                out_dict = model(c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1,
                                  start_pieces_2, end_pieces_2, labels)
         else:
             out_dict = {
@@ -286,9 +297,9 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
     else:
         pass
     # deprecated
-    # pn, pd = b_cubed(model_clusters, gold_map)
-    # rn, rd = b_cubed(gold_clusters, model_map)
-    # tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
+    pn, pd = b_cubed(model_clusters, gold_map)
+    rn, rd = b_cubed(gold_clusters, model_map)
+    tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
     p, r, f1 = bcubed(gold_sets, model_sets)
     tqdm.write("Recall: {:.6f} Precision: {:.6f} F1: {:.6f}".format(p, r, f1))
     if best_score == None or f1 > best_score:
@@ -335,9 +346,11 @@ def train_model(df, dev_set):
     scheduler = get_scheduler(optimizer, train_data_num)
     train_dataloader = DataLoader(train_event_pairs,
                                   batch_size=config_dict["batch_size"],
+                                  collate_fn=collate_fn,
                                   shuffle=True)
     dev_dataloader = DataLoader(dev_event_pairs,
                                 sampler=SequentialSampler(dev_event_pairs),
+                                collate_fn=collate_fn,
                                 batch_size=config_dict["batch_size"])
     for epoch_idx in trange(int(config_dict["epochs"]),
                             desc="Epoch",
@@ -349,8 +362,8 @@ def train_model(df, dev_set):
         batcher = tqdm(train_dataloader, desc="Batch")
         for step, batch in enumerate(batcher):
             batch = tuple(t.to(device) for t in batch)
-            sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels = batch
-            out_dict = model(sentences, start_pieces_1, end_pieces_1,
+            c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels = batch
+            out_dict = model(c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1,
                              start_pieces_2, end_pieces_2, labels)
             loss = out_dict["loss"]
             precision = out_dict["precision"]

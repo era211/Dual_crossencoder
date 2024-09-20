@@ -65,6 +65,8 @@ class CoreferenceCrossEncoder(nn.Module):
         self.device = device
         self.pos_weight = torch.tensor([0.1]).to(device)
         self.model_type = 'CoreferenceCrossEncoder'
+        self.alpha = 0.1
+        self.beta = 0.1
         self.mention_model = RobertaModel.from_pretrained('/root/autodl-tmp/PLM/roberta-large',
                                                           return_dict=True)
         self.word_embedding_dim = self.mention_model.embeddings.word_embeddings.embedding_dim
@@ -113,7 +115,15 @@ class CoreferenceCrossEncoder(nn.Module):
             "attention_mask": mask
         }
 
+    def out(self, combined_rep):
+        first_hidden = F.relu(self.hidden_layer_1(combined_rep))
+        second_hidden = F.relu(self.hidden_layer_2(first_hidden))
+        out = self.out_layer(second_hidden)
+        return out
+
     def forward(self,
+                c_sentences,
+                e_sentences,
                 sentences,
                 start_pieces_1,
                 end_pieces_1,
@@ -121,23 +131,57 @@ class CoreferenceCrossEncoder(nn.Module):
                 end_pieces_2,
                 labels=None):
         transformer_output = self.get_sentence_vecs(sentences)
+        c_transformer_output = self.get_sentence_vecs(c_sentences)  # 得到最后一层表示，（10，512，1024）
+        e_transformer_output = self.get_sentence_vecs(e_sentences)  # 得到最后一层表示，（10，512，1024）
+
+
         mention_reps_1 = self.get_mention_rep(transformer_output,
                                               start_pieces_1, end_pieces_1)
         mention_reps_2 = self.get_mention_rep(transformer_output,
                                               start_pieces_2, end_pieces_2)
+        c_mention_reps_1 = self.get_mention_rep(c_transformer_output,
+                                              start_pieces_1, end_pieces_1)
+        c_mention_reps_2 = self.get_mention_rep(c_transformer_output,
+                                              start_pieces_2, end_pieces_2)  # (10,1024*2)
+        e_mention_reps_1 = self.get_mention_rep(e_transformer_output,
+                                              start_pieces_1, end_pieces_1)
+        e_mention_reps_2 = self.get_mention_rep(e_transformer_output,
+                                              start_pieces_2, end_pieces_2)  # (10,1024*2)
+
+
         combined_rep = torch.cat(
             [mention_reps_1, mention_reps_2, mention_reps_1 * mention_reps_2],
             dim=1)
+        c_combined_rep = torch.cat(
+            [c_mention_reps_1, c_mention_reps_2, c_mention_reps_1 * c_mention_reps_2],
+            dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)
+        e_combined_rep = torch.cat(
+            [e_mention_reps_1, e_mention_reps_2, e_mention_reps_1 * e_mention_reps_2],
+            dim=1)  # (10, 1024*2+1024*2+1024*2)->(10,6144)
+
+
         combined_rep = combined_rep
-        first_hidden = F.relu(self.hidden_layer_1(combined_rep))
-        second_hidden = F.relu(self.hidden_layer_2(first_hidden))
-        out = self.out_layer(second_hidden)
-        probs = F.sigmoid(out)
+        c_combined_rep = c_combined_rep
+        e_combined_rep = e_combined_rep
+        # 得到三个模型输出
+        out = self.out(combined_rep)
+        c_out = self.out(c_combined_rep)
+        e_out = self.out(e_combined_rep)
+        cf_out = out + torch.tanh(c_out) + torch.tanh(e_out)
+
+        # 验证操作
+        cf_probs = F.sigmoid(cf_out)
+        c_probs = F.sigmoid(c_out)
+        e_probs = F.sigmoid(e_out)
+        # 事实结果减去e_only结果
+        probs = cf_probs - e_probs
+
+
         predictions = torch.where(probs > 0.5, 1.0, 0.0)
         output_dict = {"probabilities": probs, "predictions": predictions}
         if labels is not None:
             loss_fct = nn.BCEWithLogitsLoss()
-            correct = torch.sum(predictions == labels)
+            correct = torch.sum((predictions == labels).float())
             total = float(predictions.shape[0])
             acc = correct / total
             if torch.sum(predictions).item() != 0:
@@ -148,6 +192,9 @@ class CoreferenceCrossEncoder(nn.Module):
                 precision = torch.tensor(1.0).to(self.device)
             output_dict["accuracy"] = acc
             output_dict["precision"] = precision
-            loss = loss_fct(out, labels)
-            output_dict["loss"] = loss
+            loss = loss_fct(cf_out, labels)
+            c_loss = loss_fct(c_out, labels)
+            e_loss = loss_fct(e_out, labels)
+            cf_loss = loss + self.alpha*c_loss + self.beat*e_loss
+            output_dict["loss"] = cf_loss
         return output_dict

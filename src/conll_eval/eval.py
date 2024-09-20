@@ -104,7 +104,7 @@ def result():
     exp_type = 'main'
     dataset = 'ecb'
     ECRsystem = 'baseline'
-    save_path_prefix =  f'/root/autodl-tmp/Rationale4CDECR-main/outputs/{exp_type}/{dataset}/cf/bs10_alp_beta015/{ECRsystem}/eval_results/'
+    save_path_prefix =  f'/root/autodl-tmp/Rationale4CDECR-main/outputs/{exp_type}/{dataset}/{ECRsystem}/'
     gold_map_path = os.path.join(save_path_prefix ,'gold_map')
     model_map_path = os.path.join(save_path_prefix ,'model_map')
     keyfile_save_path = os.path.join(save_path_prefix ,'multi_metrics')

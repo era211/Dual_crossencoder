@@ -1,45 +1,228 @@
 import os
 import sys
+import json
 import random
 import logging
 import argparse
 import traceback
-import itertools
-from tqdm import tqdm, trange
-# --- data process
+from collections import defaultdict
 import numpy as np
-import pandas as pd
-import pickle
+from tqdm import tqdm, trange
+from scorer import *
+from nearest_neighbor import nn_generate_pairs, dataset_to_docs
 import _pickle as cPickle
-import json
-# ---
-from scorer import *  # calculate coref metrics
-# For clustering
 from graphviz import Graph
 import networkx as nx
-# Record training process
-import torch
-from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
-# from torch.utils.tensorboard import SummaryWriter  
-import torch.optim as optim
-from transformers import RobertaTokenizer
-from transformers.optimization import get_linear_schedule_with_warmup
 
-#  Dynamically adding module search paths
+import itertools
+
 for pack in os.listdir("src"):
     sys.path.append(os.path.join("src", pack))
-sys.path.append("/root/autodl-tmp/Rationale4CDECR-main/src/shared/")
-from classes import *  # make sure classes in "/src/shared/" can be imported.
+
+sys.path.append("/src/shared/")
+
+parser = argparse.ArgumentParser(description='Training a regressor')
+
+parser.add_argument('--config_path',
+                    type=str,
+                    help=' The path configuration json file')
+parser.add_argument('--out_dir',
+                    type=str,
+                    help=' The directory to the output folder')
+parser.add_argument('--eval',
+                    dest='evaluate_dev',
+                    action='store_true',
+                    help='evaluate_dev')
+parser.add_argument('--cont',
+                    dest='continue_training',
+                    action='store_true',
+                    help='Continue Training From Checkpoint')
+parser.add_argument('--random_seed',
+                    type=int,
+                    default=2048,
+                    help=' Random Seed')
+parser.add_argument('--gpu_num',
+                    type=int,
+                    default=0,
+                    help=' A single GPU number')
+
+args = parser.parse_args()
+
+out_dir = args.out_dir
+if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
+
+logging.basicConfig(filename=os.path.join(args.out_dir, "crossencoder_train_log.txt"),
+                    level=logging.DEBUG,
+                    filemode='w')
+
+# Load json config file
+with open(args.config_path, 'r') as js_file:
+    config_dict = json.load(js_file)
+
+with open(os.path.join(args.out_dir, 'crossencoder_train_config.json'), "w") as js_file:
+    json.dump(config_dict, js_file, indent=4, sort_keys=True)
+
+# if config_dict["gpu_num"] != -1:
+if args.gpu_num != -1:
+    # os.environ["CUDA_VISIBLE_DEVICES"] = str(config_dict["gpu_num"])
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_num)
+    args.use_cuda = True
+else:
+    args.use_cuda = False
+
+import torch
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+import torch.optim as optim
+
+args.use_cuda = args.use_cuda and torch.cuda.is_available()
+
+from classes import *
+from model_utils import load_entity_wd_clusters
 from bcubed_scorer import *
 from coarse import *
 from fine import *
-from data_util import *
+from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
+from transformers.optimization import get_linear_schedule_with_warmup
+
+# Fix the random seeds
+# seed = config_dict["random_seed"]
+seed = args.random_seed
+random.seed(seed)
+np.random.seed(seed)
+if args.use_cuda:
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print('Training with CUDA')
+
+tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+best_score = None
+patience = 0
+comparison_set = set()
+
+
+def all_positives(docs, events):
+    gold_clusters = defaultdict(lambda: [])
+    for doc in docs:
+        for sentence in doc.get_sentences().values():
+            sentence_mentions = sentence.gold_event_mentions if events else sentence.gold_entity_mentions
+            for mention in sentence_mentions:
+                gold_clusters[mention.gold_tag].append(mention)
+    pairs = set()
+    for value in gold_clusters.values():
+        for i, mention_1 in enumerate(value):
+            for mention_2 in value[i + 1:]:
+                pairs.add(frozenset([mention_1, mention_2]))
+    return pairs
+
+
+def wd_comparisons(docs, events):
+    pairs = set()
+    for doc in docs:
+        doc_mentions = []
+        for sentence in doc.get_sentences().values():
+            sentence_mentions = sentence.gold_event_mentions if events else sentence.gold_entity_mentions
+            doc_mentions.extend(sentence_mentions)
+        for mention_1 in doc_mentions:
+            for mention_2 in doc_mentions:
+                if not mention_1.mention_id == mention_2.mention_id:
+                    pairs.add(frozenset([mention_1, mention_2]))
+    return pairs
+
+
+def get_sents(sentences, sentence_id, window=config_dict["window_size"]):
+    lookback = max(0, sentence_id - window)
+    lookforward = min(sentence_id + window, max(sentences.keys())) + 1
+    return ([sentences[_id]
+             for _id in range(lookback, lookforward)], sentence_id - lookback)
+
+
+def structure_pair(mention_1,
+                   mention_2,
+                   doc_dict,
+                   window=config_dict["window_size"]):
+    try:
+        sents_1, sent_id_1 = get_sents(doc_dict[mention_1.doc_id].sentences,
+                                       mention_1.sent_id, window)
+        sents_2, sent_id_2 = get_sents(doc_dict[mention_2.doc_id].sentences,
+                                       mention_2.sent_id, window)
+        tokens, token_map, offset_1, offset_2 = tokenize_and_map_pair(
+            sents_1, sents_2, sent_id_1, sent_id_2, tokenizer)
+        start_piece_1 = token_map[offset_1 + mention_1.start_offset][0]
+        if offset_1 + mention_1.end_offset in token_map:
+            end_piece_1 = token_map[offset_1 + mention_1.end_offset][-1]
+        else:
+            end_piece_1 = token_map[offset_1 + mention_1.start_offset][-1]
+        start_piece_2 = token_map[offset_2 + mention_2.start_offset][0]
+        if offset_2 + mention_2.end_offset in token_map:
+            end_piece_2 = token_map[offset_2 + mention_2.end_offset][-1]
+        else:
+            end_piece_2 = token_map[offset_2 + mention_2.start_offset][-1]
+        label = [1.0] if mention_1.gold_tag == mention_2.gold_tag else [0.0]
+        record = {
+            "sentence": tokens,
+            "label": label,
+            "start_piece_1": [start_piece_1],
+            "end_piece_1": [end_piece_1],
+            "start_piece_2": [start_piece_2],
+            "end_piece_2": [end_piece_2]
+        }
+    except:
+        if window > 0:
+            return structure_pair(mention_1, mention_2, doc_dict, window - 1)
+        else:
+            traceback.print_exc()
+            sys.exit()
+    return record
+
+
+def structure_dataset(data_set,
+                      encoder_model,
+                      events=True,
+                      k=10,
+                      is_train=False):
+    processed_dataset = []
+    doc_dict = {
+        key: document
+        for topic in data_set.topics.values()
+        for key, document in topic.docs.items()
+    }
+    docs = dataset_to_docs(data_set)
+    if is_train:
+        docs = docs[:int(len(docs) * 1)]
+    pairs = nn_generate_pairs(
+        docs,
+        encoder_model,
+        k=k,
+        events=events,
+        remove_singletons=config_dict["remove_singletons"])
+    if config_dict["all_positives"] and is_train:
+        pairs = pairs | all_positives(docs, events)
+    if config_dict["add_wd_pairs"]:
+        pairs = pairs | wd_comparisons(docs, events)
+    pairs = list(pairs)
+    for mention_1, mention_2 in pairs:
+        record = structure_pair(mention_1, mention_2, doc_dict)
+        processed_dataset.append(record)
+    sentences = torch.tensor(
+        [record["sentence"] for record in processed_dataset])
+    labels = torch.tensor([record["label"] for record in processed_dataset])
+    start_pieces_1 = torch.tensor(
+        [record["start_piece_1"] for record in processed_dataset])
+    end_pieces_1 = torch.tensor(
+        [record["end_piece_1"] for record in processed_dataset])
+    start_pieces_2 = torch.tensor(
+        [record["start_piece_2"] for record in processed_dataset])
+    end_pieces_2 = torch.tensor(
+        [record["end_piece_2"] for record in processed_dataset])
+    print(labels.sum() / float(labels.shape[0]))
+    return TensorDataset(sentences, start_pieces_1, end_pieces_1,
+                         start_pieces_2, end_pieces_2, labels), pairs, doc_dict
 
 
 def get_optimizer(model):
-    '''
-       define the optimizer
-    '''
     lr = config_dict["lr"]
     optimizer = None
     parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -56,25 +239,24 @@ def get_optimizer(model):
                               lr=lr,
                               momentum=config_dict["momentum"],
                               nesterov=True)
+
     assert (optimizer is not None), "Config error, check the optimizer field"
+
     return optimizer
 
 
 def get_scheduler(optimizer, len_train_data):
-    ''' linear learning rate scheduler
-            params: optimizer
-            len_train_data: total number of training data
-    '''
     batch_size = config_dict["accumulated_batch_size"]
     epochs = config_dict["epochs"]
+
     num_train_steps = int(len_train_data / batch_size) * epochs
     num_warmup_steps = int(num_train_steps * config_dict["warmup_proportion"])
+
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps,
                                                 num_train_steps)
     return scheduler
 
 
-# For mention clustering
 def find_cluster_key(node, clusters):
     if node in clusters:
         return node
@@ -180,7 +362,6 @@ def transitive_closure_merge(edges, mentions, model, doc_dict, graph,
     return clusters, inv_clusters
 
 
-# eval the cross-encoder
 def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
              epoch_num):
     global best_score, comparison_set
@@ -226,17 +407,18 @@ def evaluate(model, encoder_model, dev_dataloader, dev_pairs, doc_dict,
                            labels[p_index][0], probs[p_index][0]))
             saved_edges.append((pair_0, pair_1,
                                 labels[p_index][0].detach().cpu().tolist(), probs[p_index][0]))
+        #for item in best_edges:
+        #    edges.add(best_edges[item])
+
         offset += len(predictions)
 
     tqdm.write("Pairwise Accuracy: {:.6f}".format(acc_sum /
                                                   float(len(dev_dataloader))))
-    # writer.add_scalar('dev/pairwise_acc',acc_sum/float(len(dev_dataloader)),epoch_num)
     eval_edges(edges, mentions, model, doc_dict, saved_edges)
     assert len(saved_edges) >= len(edges)
     return saved_edges
 
 
-# eval the coref-metric based on edges among clusters
 def eval_edges(edges, mentions, model, doc_dict, saved_edges):
     print(len(mentions))
     global best_score, patience
@@ -250,7 +432,7 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
                      mention.sent_id].get_raw_sentence())))
     bridges = list(nx.bridges(G))
     articulation_points = list(nx.articulation_points(G))
-    # edges = [edge for edge in edges if edge not in bridges]
+    #edges = [edge for edge in edges if edge not in bridges]
     clusters, inv_clusters = transitive_closure_merge(edges, mentions, model,
                                                       doc_dict, G, dot)
 
@@ -270,42 +452,25 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
         else:
             model_map[mention.mention_id] = mention.mention_id
             model_sets.append(mention.mention_id)
-    model_clusters = [[thing[0] for thing in group[1]] for group in
-                      itertools.groupby(sorted(zip(ids, model_sets), key=lambda x: x[1]), lambda x: x[1])]
-    gold_clusters = [[thing[0] for thing in group[1]] for group in
-                     itertools.groupby(sorted(zip(ids, gold_sets), key=lambda x: x[1]), lambda x: x[1])]
-    if args.mode == 'eval':  # During Test
-        print('saving gold_map, model_map...')
-        # save the golden_map which groups all mentions based on the annotation.
-        with open(os.path.join(args.out_dir, "gold_map"), 'wb') as f:
-            pickle.dump(gold_map, f)
-            # save the model_map which groups all mentions based on the coreference pipeline.
-        with open(os.path.join(args.out_dir, "model_map"), 'wb') as f:
-            pickle.dump(model_map, f)
-        print('Saved!')
-    else:
-        pass
-    # deprecated
-    # pn, pd = b_cubed(model_clusters, gold_map)
-    # rn, rd = b_cubed(gold_clusters, model_map)
-    # tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
+    model_clusters = [[thing[0] for thing in group[1]] for group in itertools.groupby(sorted(zip(ids, model_sets), key=lambda x: x[1]), lambda x: x[1])] 
+    gold_clusters = [[thing[0] for thing in group[1]] for group in itertools.groupby(sorted(zip(ids, gold_sets), key=lambda x: x[1]), lambda x: x[1])]
+    pn, pd = b_cubed(model_clusters, gold_map)
+    rn, rd = b_cubed(gold_clusters, model_map)
+    tqdm.write("Alternate = Recall: {:.6f} Precision: {:.6f}".format(pn/pd, rn/rd))
     p, r, f1 = bcubed(gold_sets, model_sets)
     tqdm.write("Recall: {:.6f} Precision: {:.6f} F1: {:.6f}".format(p, r, f1))
     if best_score == None or f1 > best_score:
         tqdm.write("F1 Improved Saving Model")
         best_score = f1
         patience = 0
-        if args.mode == 'train':  # During training
-            # save the best model measured by b_cubded F1 in the current epoch
+        if not args.evaluate_dev:
             torch.save(
                 model.state_dict(),
-                os.path.join(args.out_dir, "AD_crossencoder_best_model"),
+                os.path.join(args.out_dir, "crossencoder_best_model"),
             )
-            # save the edges linking coreferential events on the dev corpus
             with open(os.path.join(args.out_dir, "crossencoder_dev_edges"), "wb") as f:
                 cPickle.dump(saved_edges, f)
-        else:  # During Test
-            # save the edges linking coreferential events on the test corpus
+        else:
             with open(os.path.join(args.out_dir, "crossencoder_test_edges"), "wb") as f:
                 cPickle.dump(saved_edges, f)
             # dot.render(os.path.join(args.out_dir, "clustering"))
@@ -316,29 +481,42 @@ def eval_edges(edges, mentions, model, doc_dict, saved_edges):
             sys.exit()
 
 
-def train_model(df, dev_set):
+def train_model(train_set, dev_set):
     device = torch.device("cuda:0" if args.use_cuda else "cpu")
-    # load bi-encoder model
-    event_encoder_path = config_dict['event_encoder_model']
-    # with open(event_encoder_path, 'rb') as f:
-    #     params = torch.load(f)
-    #     event_encoder = EncoderCosineRanker(device)
-    #     event_encoder.load_state_dict(params)
-    #     event_encoder = event_encoder.to(device).eval()
-    #     event_encoder.requires_grad = False
-    event_encoder = None
+    #导入bi-encoder model
+    with open(os.path.join(args.out_dir, 'candidate_generator_best_model'), 'rb') as f:
+        params = torch.load(f)
+        event_encoder = EncoderCosineRanker(device)
+        event_encoder.load_state_dict(params)
+        event_encoder = event_encoder.to(device).eval()
+        event_encoder.requires_grad = False
     model = CoreferenceCrossEncoder(device).to(device)
-    train_data_num = len(df)
-    train_event_pairs = structure_data_for_train1(df)
-    dev_event_pairs, dev_pairs, dev_docs = structure_dataset_for_eval1(dev_set, eval_set='dev')
-    optimizer = get_optimizer(model)
-    scheduler = get_scheduler(optimizer, train_data_num)
+    #从断点开始训练
+    if args.continue_training:
+        print("Loading Model from Checkpoint...")
+        with open(os.path.join(args.out_dir, 'crossencoder_best_model'), 'rb') as f:
+            params = torch.load(f)
+            model.load_state_dict(params)
+    #得到train event pair
+    train_event_pairs, _, _ = structure_dataset(train_set,
+                                                event_encoder,
+                                                events=config_dict["events"],
+                                                k=15,
+                                                is_train=True)
+    #得到dev set相关的输出 TensorDataset(sentences, start_pieces_1, end_pieces_1,start_pieces_2, end_pieces_2, labels), pairs, doc_dict
+    dev_event_pairs, dev_pairs, dev_docs = structure_dataset(
+        dev_set, event_encoder, events=config_dict["events"], k=5)
+    optimizer = get_optimizer(model)#初始化优化器
+    scheduler = get_scheduler(optimizer, len(train_event_pairs))#初始化scheduler，输入参数为train set中pair的数目
+    train_sampler = SequentialSampler(train_event_pairs)#序列化采样
     train_dataloader = DataLoader(train_event_pairs,
-                                  batch_size=config_dict["batch_size"],
-                                  shuffle=True)
+                                  sampler=train_sampler,
+                                  batch_size=config_dict["batch_size"])
+    dev_sampler = SequentialSampler(dev_event_pairs)
     dev_dataloader = DataLoader(dev_event_pairs,
-                                sampler=SequentialSampler(dev_event_pairs),
+                                sampler=dev_sampler,
                                 batch_size=config_dict["batch_size"])
+
     for epoch_idx in trange(int(config_dict["epochs"]),
                             desc="Epoch",
                             leave=True):
@@ -359,10 +537,9 @@ def train_model(df, dev_set):
             tr_loss += loss.item()
             tr_p += precision.item()
             tr_a += accuracy.item()
+
             if ((step + 1) * config_dict["batch_size"]
-            ) % config_dict["accumulated_batch_size"] == 0:
-                # For main exp, we set batch_size as 10, accumulated_batch_size as 8.
-                # This should be equivalent to the case of batch_size being 40 and accumulated_batch_size being 8
+                ) % config_dict["accumulated_batch_size"] == 0:
                 batcher.set_description(
                     "Batch (average loss: {:.6f} precision: {:.6f} accuracy: {:.6f})"
                     .format(
@@ -380,52 +557,58 @@ def train_model(df, dev_set):
 
 
 def main():
-    if args.mode == 'train':
-        logging.info('Loading training and dev data...')
-        logging.info('Training and dev data have been loaded.')
-        train_df = pd.read_csv(config_dict["train_path"], index_col=0)
+    logging.info('Loading training and dev data...')
+
+    logging.info('Training and dev data have been loaded.')
+    if not args.evaluate_dev:
+        with open(config_dict["train_path"], 'rb') as f:
+            training_data = cPickle.load(f)
         with open(config_dict["dev_path"], 'rb') as f:
             dev_data = cPickle.load(f)
-        train_model(train_df, dev_data)
-    elif args.mode == 'eval':
+        # # Use a toy training dataset to debug.
+        # training_data.topics = {
+        #     "3_ecb": training_data.topics["3_ecb"],
+        #     "3_ecbplus": training_data.topics["3_ecbplus"],
+        # }
+        # # Use a toy training dataset to debug.
+        # dev_data.topics = {"2_ecb": dev_data.topics["2_ecb"]}
+        train_model(training_data, dev_data)
+    else:
         with open(config_dict["test_path"], 'rb') as f:
-            test_data = cPickle.load(f)
+            dev_data = cPickle.load(f)
+        # # Use a toy training dataset to debug.
+        # dev_data.topics = {"37_ecb": dev_data.topics["37_ecb"], "37_ecbplus": dev_data.topics["37_ecbplus"]}
         topic_sizes = [
             len([
                 mention for key, doc in topic.docs.items()
                 for sent_id, sent in doc.get_sentences().items()
                 for mention in sent.gold_event_mentions
-            ]) for topic in test_data.topics.values()
+            ]) for topic in dev_data.topics.values()
         ]
         print(topic_sizes)
         print(sum(topic_sizes))
         print(sum([size * size for size in topic_sizes]))
         device = torch.device("cuda:0" if args.use_cuda else "cpu")
-        event_encoder_path = config_dict['event_encoder_model']
-        with open(event_encoder_path, 'rb') as f:
+        with open(os.path.join(args.out_dir, 'candidate_generator_best_model'), 'rb') as f:
             params = torch.load(f)
             event_encoder = EncoderCosineRanker(device)
             event_encoder.load_state_dict(params)
             event_encoder = event_encoder.to(device).eval()
             event_encoder.requires_grad = False
-
-        if config_dict['eval_model_path'] == False:
-            logging.info('Loading default model for eval...')
-            eval_model_path = os.path.join(args.out_dir, 'AD_crossencoder_best_model')
-        else:
-            logging.info('Loading the specified model for eval...')
-            eval_model_path = config_dict['eval_model_path']
-        with open(eval_model_path, 'rb') as f:
+        with open(os.path.join(args.out_dir, 'crossencoder_best_model'), 'rb') as f:
             params = torch.load(f)
             model = CoreferenceCrossEncoder(device)
             model.load_state_dict(params)
             model = model.to(device).eval()
             model.requires_grad = False
-        test_event_pairs, test_pairs, test_docs = structure_dataset_for_eval(test_data, eval_set='test')
-        test_dataloader = DataLoader(test_event_pairs,
-                                     sampler=SequentialSampler(test_event_pairs),
-                                     batch_size=config_dict["batch_size"])
-        evaluate(model, event_encoder, test_dataloader, test_pairs, test_docs, 0)
+        dev_event_pairs, dev_pairs, dev_docs = structure_dataset(
+            dev_data, event_encoder, events=config_dict["events"], k=5)
+        dev_sampler = SequentialSampler(dev_event_pairs)
+        dev_dataloader = DataLoader(dev_event_pairs,
+                                    sampler=dev_sampler,
+                                    batch_size=config_dict["batch_size"])
+        evaluate(model, event_encoder, dev_dataloader, dev_pairs, dev_docs, 0)
+
 
 
 if __name__ == '__main__':

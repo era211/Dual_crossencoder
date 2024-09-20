@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from transformers import RobertaTokenizer
 #  Dynamically adding module search paths
 from classes import *  # make sure classes in "/src/shared/" can be imported.
-from fine import *
+from fine_cf import *
 
 parser = argparse.ArgumentParser(description='Training a cross-encoder')
 parser.add_argument('--config_path',
@@ -459,3 +459,54 @@ def structure_data_for_train1(df):  # 构建训练数据对
 
         print("数据已成功从文件中读取...")
     return data_set_in_tensor
+
+
+def collate_fn(batch):
+    all_sentences, all_start_piece_1, all_end_piece_1, all_start_piece_2, all_end_piece_2, all_labels = zip(*batch)
+
+    # 获取RoBERTa的mask token id和padding token id
+    mask_token_id = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+    pad_token_id = tokenizer.pad_token_id
+
+    # 处理每个句子的编码，将指定范围之外的部分替换为mask token，但保留padding部分
+    c_only_sentences = []
+    e_only_sentences = []
+    for i in range(len(all_sentences)):
+        sentence = all_sentences[i]
+        start_idx_1 = all_start_piece_1[i].item()
+        end_idx_1 = all_end_piece_1[i].item()
+        start_idx_2 = all_start_piece_2[i].item()
+        end_idx_2 = all_end_piece_2[i].item()
+
+        # 创建mask后的句子
+        c_masked_sentence = sentence.clone()  # 深拷贝原句子
+        e_masked_sentence = sentence.clone()  # 深拷贝原句子
+        # Mask除指定范围以外的部分，但保留padding
+        for j in range(len(e_masked_sentence)):
+            if e_masked_sentence[j] != pad_token_id:
+                if not (start_idx_1 <= j <= end_idx_1 or start_idx_2 <= j <= end_idx_2):
+                    e_masked_sentence[j] = mask_token_id
+
+        # 遍历每个token，将 start_piece_1 ~ end_piece_1 和 start_piece_2 ~ end_piece_2 范围内的部分 mask 掉
+        for j in range(len(c_masked_sentence)):
+            if c_masked_sentence[j] != pad_token_id:  # 跳过 padding 部分
+                if start_idx_1 <= j <= end_idx_1 or start_idx_2 <= j <= end_idx_2:
+                    c_masked_sentence[j] = mask_token_id  # 将这些范围内的token替换为mask token
+
+        # 将处理后的句子添加到列表
+        e_only_sentences.append(e_masked_sentence)
+
+        c_only_sentences.append(c_masked_sentence)
+
+    # 将处理后的句子构建成批次
+    c_sentences = torch.stack(c_only_sentences)
+    e_sentences = torch.stack(e_only_sentences)
+    # 将其他部分处理为tensor，并返回批次数据
+    sentences = torch.stack(all_sentences)
+    start_pieces_1 = torch.tensor(all_start_piece_1).reshape(-1, 1)
+    end_pieces_1 = torch.tensor(all_end_piece_1).reshape(-1, 1)
+    start_pieces_2 = torch.tensor(all_start_piece_2).reshape(-1, 1)
+    end_pieces_2 = torch.tensor(all_end_piece_2).reshape(-1, 1)
+    labels = torch.tensor(all_labels).reshape(-1, 1)
+
+    return c_sentences, e_sentences, sentences, start_pieces_1, end_pieces_1, start_pieces_2, end_pieces_2, labels
